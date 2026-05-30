@@ -1,0 +1,130 @@
+// Collection.tsx
+// Buyer Collection page (R71 §3.4 row 4).
+// Design ref: /docs/ui_design.md §7 (/collection route).
+//
+// Grid of deeds the signed-in user owns. Each tile shows the Share Copy as
+// thumbnail and links to the image page (where the owner sees the OwnerBar).
+// Source: deeds where owner_wallet_address == session.wallet_address.
+
+import { useEffect, useState } from 'react';
+import { Link } from 'react-router-dom';
+
+interface OwnedDeed {
+    image_id: string;
+    title: string;
+    creator_display_name: string;
+    share_copy_url: string;         // Share Copy thumbnail (R71 §2.7)
+    mint_address: string;
+    minted_at: string;              // ISO
+    deed_state: 'sealed' | 'opened' | 'rights_disputed' | 'void' | 'burned';
+}
+
+const USE_MOCK = true;
+
+export default function CollectionPage() {
+    const [deeds, setDeeds] = useState<OwnedDeed[]>([]);
+    const [loading, setLoading] = useState(true);
+
+    useEffect(() => {
+        if (USE_MOCK) {
+            setDeeds(makeMockDeeds());
+            setLoading(false);
+            return;
+        }
+        // TODO: GET /v1/me/collection (R71 §3.7 row TBD)
+        // TODO: backend joins deeds.owner_wallet_address == session.wallet_address
+    }, []);
+
+    return (
+        <main className="min-h-screen mx-auto max-w-6xl px-4 py-8 lg:py-12 space-y-8">
+            <header className="space-y-1">
+                <h1 className="text-2xl font-light tracking-tight">Your collection</h1>
+                <p className="text-sm text-base-content/60">
+                    Images you own. Tap any tile to view, share, or open the deed.
+                </p>
+            </header>
+
+            {loading ? (
+                <span className="loading loading-spinner" />
+            ) : deeds.length === 0 ? (
+                <EmptyState />
+            ) : (
+                <DeedGrid deeds={deeds} />
+            )}
+        </main>
+    );
+}
+
+function EmptyState() {
+    return (
+        <div className="card bg-base-200">
+            <div className="card-body items-center text-center gap-4">
+                <p className="text-base-content/70">You don't own any images yet.</p>
+                <Link to="/" className="link link-hover text-sm">
+                    Browse the gallery →
+                </Link>
+            </div>
+        </div>
+    );
+}
+
+function DeedGrid({ deeds }: { deeds: OwnedDeed[] }) {
+    return (
+        <ul className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
+            {deeds.map(d => (
+                <li key={d.mint_address}>
+                    <Link to={`/${d.image_id}`} className="block group">
+                        <div className="aspect-square bg-base-200 rounded-md overflow-hidden">
+                            <img
+                                src={d.share_copy_url}
+                                alt={d.title}
+                                className="w-full h-full object-cover group-hover:opacity-90 transition-opacity"
+                            />
+                        </div>
+                        <div className="mt-2 space-y-0.5">
+                            <p className="text-sm truncate">{d.title}</p>
+                            <p className="text-xs text-base-content/60 truncate">
+                                {d.creator_display_name}
+                            </p>
+                            <p className="text-xs text-base-content/40">
+                                {new Date(d.minted_at).toLocaleDateString()}
+                                {d.deed_state !== 'sealed' && (
+                                    <span className="ml-2 badge badge-xs badge-warning">
+                                        {d.deed_state}
+                                    </span>
+                                )}
+                            </p>
+                        </div>
+                    </Link>
+                </li>
+            ))}
+        </ul>
+    );
+}
+
+// -------------------------------------------------------------------
+// DEV mock
+// -------------------------------------------------------------------
+
+function makeMockDeeds(): OwnedDeed[] {
+    return [
+        {
+            image_id: 'abc1d',
+            title: 'After the rain',
+            creator_display_name: 'Sample Creator',
+            share_copy_url: 'https://placehold.co/600x600/eee/aaa?text=Share',
+            mint_address: 'MintAddr1111111111111111111111111111111111',
+            minted_at: '2026-05-01',
+            deed_state: 'sealed',
+        },
+        {
+            image_id: 'k7p2m',
+            title: 'Northbound',
+            creator_display_name: 'Another Creator',
+            share_copy_url: 'https://placehold.co/600x600/eee/aaa?text=Share',
+            mint_address: 'MintAddr2222222222222222222222222222222222',
+            minted_at: '2026-04-18',
+            deed_state: 'sealed',
+        },
+    ];
+}

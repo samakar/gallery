@@ -1,0 +1,241 @@
+// Gallery MVP data model.
+// Source of truth: R71 §3.6, with the identity OI-06 additions
+// (creator_headshot_url, creator_bio) and the moderation-driven
+// users.status column (per moderation.md §2.3).
+//
+// Driver: SQLite (single-file local DB per R71 §3.6); migrates to Postgres
+// at MMP. SQLite stores JSON as TEXT; the application code JSON.parse / stringify.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// -------------------------------------------------------------------
+// Identity layer
+// -------------------------------------------------------------------
+
+// One row per Magic-authenticated principal. Touched by every authenticated
+// request. No role-specific columns -- roles are row-existence in `creators`
+// and `owners` per identity.md §2.3.
+model User {
+  user_id        String   @id @default(uuid())
+  magic_did      String   @unique
+  email          String
+  oauth_provider String // "google" | "apple"
+  wallet_address String?  @unique // null until post-ESIGN wallet provisioning
+  status         String   @default("active") // "active" | "suspended" (moderation Tier 0); not yet in R71 §3.6
+  created_at     DateTime @default(now())
+  updated_at     DateTime @updatedAt
+
+  creator       Creator?
+  owner         Owner?
+  signatures    Signature[]
+  reviewed_by_me ImageReview[]
+
+  @@index([email])
+  @@map("users")
+}
+
+// Founder-curated gate for creator onboarding (R71 §3.6). Email is the join
+// key against `users.email` at sign-cma.
+model CreatorAllowlist {
+  email      String   @id
+  created_at DateTime @default(now())
+
+  @@map("creator_allowlist")
+}
+
+// CREATOR role row. Existence is the grant (identity.md §2.3). Created at
+// sign-cma in one txn with the CMA signature (INV-2).
+model Creator {
+  user_id                   String   @id
+  display_name              String
+  legal_name                String
+  legal_address             String   // JSON; SQLite stores as TEXT
+  entity_type               String   // "individual" | "llc" | "corp"
+  youtube_channel_handle    String
+  creator_headshot_url      String?  // R62 §3.1; per identity OI-06, not yet in R71 §3.6
+  creator_bio               String?  // R62 §3.1; "about me" voice (distinct from per-image description)
+  stripe_connect_account_id String?
+  created_at                DateTime @default(now())
+  updated_at                DateTime @updatedAt
+
+  user   User    @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+  images Image[]
+
+  @@map("creators")
+}
+
+// OWNER role row. Existence is the grant. Created at MJA capture (first
+// purchase). Identity for the MJA anchors on users.magic_did + signatures row.
+model Owner {
+  user_id            String   @id
+  stripe_customer_id String?
+  created_at         DateTime @default(now())
+  updated_at         DateTime @updatedAt
+
+  user      User       @relation(fields: [user_id], references: [user_id], onDelete: Cascade)
+  purchases Purchase[]
+  deeds     Deed[]
+
+  @@index([stripe_customer_id])
+  @@map("owners")
+}
+
+// -------------------------------------------------------------------
+// Image lifecycle (Certification entry + Commerce ownership)
+// -------------------------------------------------------------------
+
+// One row per uploaded image. `image_id` (5-char base-36) is the universal
+// handle assigned at Card 2.
+model Image {
+  image_id                    String    @id // TEXT(5), R62 §2.3 base-36
+  creator_id                  String
+  title                       String
+  description                 String
+  creation_date               DateTime
+  listed_price                Int // cents
+  status                      String    @default("pending_review")
+  // ^ "pending_review" | "draft" | "live" | "sold" | "taken_down"; forward-compat "rights_disputed"
+  takedown_reason             String?
+  dek_wrapped                 Bytes? // DEK_image wrapped to platform KEK (env-secret); populated post-ESIGN
+  arweave_uri                 String? // populated at first sale (§2.4 step 12)
+  sha256                      String? // canonical Master pixels sha256; populated at first sale
+  width_px                    Int?
+  height_px                   Int?
+  visibility                  String    @default("public") // "public" | "private" (post-mint -> private)
+  privacy_updated_at          DateTime?
+  signing_event_id_authorship String? // per-image ISA (esign caller stamps)
+  published_at                DateTime?
+  created_at                  DateTime  @default(now())
+  updated_at                  DateTime  @updatedAt
+
+  creator    Creator       @relation(fields: [creator_id], references: [user_id])
+  reviews    ImageReview[]
+  purchases  Purchase[]
+  deed       Deed?
+  signatures Signature[]
+
+  @@index([creator_id, status])
+  @@index([status, published_at(sort: Desc)])
+  @@index([status, created_at(sort: Desc)])
+  @@map("images")
+}
+
+// -------------------------------------------------------------------
+// Moderation
+// -------------------------------------------------------------------
+
+// One row per moderator review event. The unchecked checkbox IS the rejection
+// reason (moderation.md §1.4). Schema permits multiple reviews per image for
+// forward-compat re-review (OI-02).
+model ImageReview {
+  id                    String    @id @default(uuid())
+  image_id              String
+  reviewer_id           String
+  decision              String // "approved" | "rejected_tier1" | "rejected_tier0"
+  checks                String // JSON: { tier0_clean: bool, tier1_clean: bool }
+  ncmec_report_filed_at DateTime?
+  decided_at            DateTime  @default(now())
+
+  image    Image @relation(fields: [image_id], references: [image_id])
+  reviewer User  @relation(fields: [reviewer_id], references: [user_id])
+
+  @@index([image_id])
+  @@map("image_reviews")
+}
+
+// -------------------------------------------------------------------
+// ESIGN ledger (append-only at the application layer)
+// -------------------------------------------------------------------
+
+// One row per ESIGN click event. Covers CMA, MJA, ISA, License Acceptance.
+// document_version_hash is sha256 of the rendered text -- content integrity
+// anchor independent of the human label.
+model Signature {
+  id                     String   @id @default(uuid())
+  user_id                String
+  document_type          String // "CMA" | "MJA" | "IMAGE_SIGNING_AFFIRMATION" | "LICENSE_ACCEPTANCE"
+  document_version_hash  String
+  document_version_label String
+  image_id               String? // required for ISA + LICENSE_ACCEPTANCE
+  clicked_at             DateTime @default(now())
+  ip_address             String
+  session_token_hash     String
+
+  user                  User       @relation(fields: [user_id], references: [user_id])
+  image                 Image?     @relation(fields: [image_id], references: [image_id])
+  mja_for_purchases     Purchase[] @relation("MJAPurchases")
+  license_for_purchases Purchase[] @relation("LicensePurchases")
+
+  @@index([user_id, document_type])
+  @@map("signatures")
+}
+
+// -------------------------------------------------------------------
+// Commerce: Purchases
+// -------------------------------------------------------------------
+
+// One row per buy attempt. Lifecycle spans Stripe checkout through deed mint
+// per R71 §3.8 purchase state machine.
+model Purchase {
+  id                         String    @id @default(uuid())
+  image_id                   String
+  owner_id                   String
+  seller_user_id             String // = creators.user_id at MVP (90% net recipient)
+  stripe_payment_intent_id   String?
+  stripe_checkout_session_id String?
+  amount_gross_cents         Int?
+  amount_creator_net_cents   Int? // 90% net of Stripe fee
+  amount_platform_net_cents  Int? // 10% net of Stripe fee
+  status                     String    @default("started")
+  // ^ "started" | "paid" | "building" | "minting" | "confirmed" | "failed" | "refunded"
+  failure_reason             String?
+  monogram_text              String? // per-purchase metadata; restored per ADR-0002 (ADR-0001 was reversed on this column)
+  deed_mint_tx_signature     String?
+  signing_event_id_mja       String?
+  signing_event_id_license   String?
+  created_at                 DateTime  @default(now())
+  completed_at               DateTime?
+
+  image             Image      @relation(fields: [image_id], references: [image_id])
+  owner             Owner      @relation(fields: [owner_id], references: [user_id])
+  mja_signature     Signature? @relation("MJAPurchases", fields: [signing_event_id_mja], references: [id])
+  license_signature Signature? @relation("LicensePurchases", fields: [signing_event_id_license], references: [id])
+
+  @@index([stripe_payment_intent_id])
+  @@index([owner_id, created_at(sort: Desc)])
+  @@index([seller_user_id, status, created_at(sort: Desc)])
+  @@map("purchases")
+}
+
+// -------------------------------------------------------------------
+// Registry: Deeds (on-chain ownership mirror)
+// -------------------------------------------------------------------
+
+// Solana ledger is authoritative; this row exists for fast UI render and
+// ownership-gating lookups without per-request RPC.
+model Deed {
+  image_id             String   @id
+  mint_address         String   @unique // Solana base58 NFT address
+  owner_wallet_address String
+  owner_id             String
+  deed_state           String   @default("sealed")
+  // ^ "sealed" at MVP; forward-compat: "opened" | "rights_disputed" | "void" | "burned"
+  variant_hashes       String // JSON: { "M+00": {sha256, anchored_at}, "E+01": {sha256, anchored_at} }
+  minted_at            DateTime
+  created_at           DateTime @default(now())
+  updated_at           DateTime @updatedAt
+
+  image Image @relation(fields: [image_id], references: [image_id])
+  owner Owner @relation(fields: [owner_id], references: [user_id])
+
+  @@index([owner_wallet_address])
+  @@index([owner_id, minted_at(sort: Desc)])
+  @@map("deeds")
+}

@@ -1,0 +1,30 @@
+# Claude Code
+.claude/settings.local.json
+
+# Dependencies
+node_modules/
+
+# Build output
+dist/
+.vite/
+
+# Local environment (recreate from .env.example)
+.env
+.env.local
+
+# Local SQLite -- regenerable via `npm run prisma:migrate -- --name init && npm run db:seed`
+prisma/dev.db
+prisma/dev.db-journal
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store
+Thumbs.db
+
+# IDE
+.vscode/
+.idea/
+*.swp
