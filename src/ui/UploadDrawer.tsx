@@ -7,8 +7,9 @@
 // it to the grid behind the drawer (live feedback).
 
 import { useRef, useState } from 'react';
+import { Link } from 'react-router-dom';
 import { validateClientSide, type ImageSpecResult } from '../cert/image_spec';
-import { api } from './api';
+import { api, ApiError } from './api';
 
 export interface UploadedImage {
     image_id: string;
@@ -25,6 +26,7 @@ type CurrentState =
     | { kind: 'validating' }
     | { kind: 'uploading' }
     | { kind: 'rejected'; code: string; message: string }
+    | { kind: 'duplicate'; conflicting_image_id: string }
     | { kind: 'error'; message: string };
 
 export default function UploadDrawer({
@@ -43,6 +45,17 @@ export default function UploadDrawer({
     async function onPick(e: React.ChangeEvent<HTMLInputElement>) {
         const file = e.target.files?.[0];
         if (!file) return;
+        // Mirror the server cap so we don't waste 50+ MB of upload bandwidth.
+        const MAX_BYTES = 50 * 1024 * 1024;
+        if (file.size > MAX_BYTES) {
+            setState({
+                kind: 'rejected',
+                code: 'FILE_TOO_LARGE',
+                message: `"${file.name}" is ${(file.size / 1024 / 1024).toFixed(1)} MB. Images must be under 50 MB.`,
+            });
+            resetInput();
+            return;
+        }
         setState({ kind: 'validating' });
 
         let result: ImageSpecResult;
@@ -62,20 +75,29 @@ export default function UploadDrawer({
 
         setState({ kind: 'uploading' });
         try {
+            const fd = new FormData();
+            fd.append('file', file);
             const created = await api<UploadedImage>('/v1/images', {
                 method: 'POST',
-                body: JSON.stringify({
-                    filename: file.name,
-                    width: result.width,
-                    height: result.height,
-                }),
+                body: fd,
             });
             onUploaded(created);
             setUploadedFilenames(prev => [file.name, ...prev]);
             setState({ kind: 'idle' });
         } catch (err) {
-            const message = err instanceof Error ? err.message : String(err);
-            setState({ kind: 'error', message: `Upload failed: ${message}` });
+            if (
+                err instanceof ApiError &&
+                err.body?.error === 'CREATOR_DUPLICATE' &&
+                typeof err.body?.conflicting_image_id === 'string'
+            ) {
+                setState({
+                    kind: 'duplicate',
+                    conflicting_image_id: err.body.conflicting_image_id,
+                });
+            } else {
+                const message = err instanceof Error ? err.message : String(err);
+                setState({ kind: 'error', message: `Upload failed: ${message}` });
+            }
         }
         resetInput();
     }
@@ -149,6 +171,21 @@ function StatusView({ state }: { state: CurrentState }) {
                     <span>{state.message}</span>
                     <code className="font-mono text-xs text-base-content/60">{state.code}</code>
                 </div>
+            </div>
+        );
+    if (state.kind === 'duplicate')
+        return (
+            <div className="alert alert-warning text-sm">
+                <span>
+                    You already uploaded{' '}
+                    <Link
+                        to={`/${state.conflicting_image_id}`}
+                        className="link link-hover font-semibold"
+                    >
+                        this image
+                    </Link>
+                    .
+                </span>
             </div>
         );
     return <div className="alert alert-error text-sm">{state.message}</div>;

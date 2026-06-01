@@ -15,10 +15,10 @@ Per-asset workflow for deed issuance. Spawned as part of Commerce's `run_image_o
 
 | # | Step | Surface | Subsystem call | Side-effect | Failure |
 |---|---|---|---|---|---|
-| 1 | Arweave Master build | Backend → Arweave | arweave_master.buildAndUpload(image_id, buyer_wallet_pubkey) | `images.arweave_uri` + `images.sha256` persisted; `enc_final` returned | ARWEAVE_UPLOAD_FAILED |
+| 1 | Arweave Master build | Backend → Arweave | arweave_master.buildAndUpload(image_id, buyer_wallet_pubkey) | `images.arweave_uri` + `images.sha256` persisted; `images.phash` read-through (already set at Card 1 per [ADR-0005](../adr/adr_0005_phash_in_deed_and_uniqueness_gate.md)); `enc_final` returned | ARWEAVE_UPLOAD_FAILED |
 | 2 | Share Copy build | Backend + Cloudinary | image_gen.generateShareCopy(image_id, 1, monogram_text) -- called by run_image_ops between steps 1 and 3 | Cloudinary `public_id` `<image_id>-share-1` exists | VARIANT_BUILD_FAILED |
 | 3 | Transition state | Backend (run_image_ops) | Conditional UPDATE `purchases.status='minting' WHERE id=? AND status='building'` | -- | -- |
-| 4 | Mint dispatch | Backend → Crossmint | crossmint_dispatch.dispatch(image_id, buyer_wallet_pubkey, arweave_uri, sha256, enc_final, license_signing_event_id) | Crossmint mint job queued; `crossmint_job_id` returned | CROSSMINT_DISPATCH_FAILED |
+| 4 | Mint dispatch | Backend → Crossmint | crossmint_dispatch.dispatch(image_id, buyer_wallet_pubkey, arweave_uri, sha256, phash, enc_final, license_signing_event_id) | Crossmint mint job queued; `crossmint_job_id` returned; deed `variant_hashes["M+00"]` carries both sha256 + phash anchors | CROSSMINT_DISPATCH_FAILED |
 | 5 | Mint outcome | Crossmint → Backend | crossmint_webhook.handleWebhook(mint.succeeded \| mint.failed) | On success: `deeds` row inserted with `deed_state='sealed'`; metadata.onMintSucceeded → `images.status='sold'` + `images.visibility='private'`; `purchases.status='confirmed'`. On failure: payments.refundPurchase | MINT_FAILED |
 
 ## 3. State Transitions
@@ -77,6 +77,7 @@ Per-asset workflow for deed issuance. Spawned as part of Commerce's `run_image_o
 | purchase_wsd.md (Commerce) | Card 4 -- parent workflow |
 | **ADR-0001** | Build trigger: webhook does not spawn; buyer POST does |
 | **ADR-0002** | Monogram persisted; passed to step 2 inline |
+| **ADR-0005** | phash carried through from Card 1 read-through; deed embeds both sha256 + phash at M+00 |
 | R71 §2.4 steps 11-14 | authoritative reference |
 | R71 §3.7 row 22 | crossmint webhook endpoint |
 | R71 §3.8 purchase + image lifecycles | state machines |
@@ -84,4 +85,4 @@ Per-asset workflow for deed issuance. Spawned as part of Commerce's `run_image_o
 | R62 §3.1 Card 5 | reference card |
 
 ---
-*Last Updated: 05/29/26 17:00*
+*Last Updated: 05/29/26 17:30*

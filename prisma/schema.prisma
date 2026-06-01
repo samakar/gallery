@@ -106,11 +106,15 @@ model Image {
   dek_wrapped                 Bytes? // DEK_image wrapped to platform KEK (env-secret); populated post-ESIGN
   arweave_uri                 String? // populated at first sale (§2.4 step 12)
   sha256                      String? // canonical Master pixels sha256; populated at first sale
+  phash                       String? // 64-bit DCT perceptual hash (16-char hex) per ADR-0005; populated at Card 1 uniqueness gate
+  image_spec                  String? // JSON per R62 §2.3: { width_px, height_px, color_space, icc_profile, color_depth_bits, file_type, file_size_bytes }; deed `image_spec` block source
   width_px                    Int?
   height_px                   Int?
   visibility                  String    @default("public") // "public" | "private" (post-mint -> private)
   privacy_updated_at          DateTime?
   signing_event_id_authorship String? // per-image ISA (esign caller stamps)
+  stripe_product_id           String?   @unique // Stripe Product id; created on first checkout init, reused thereafter
+  stripe_price_id             String? // Stripe Price id (default_price on the Product); recreated if listed_price changes
   published_at                DateTime?
   created_at                  DateTime  @default(now())
   updated_at                  DateTime  @updatedAt
@@ -190,6 +194,7 @@ model Purchase {
   seller_user_id             String // = creators.user_id at MVP (90% net recipient)
   stripe_payment_intent_id   String?
   stripe_checkout_session_id String?
+  crossmint_job_id           String?   @unique // mint job correlation handle; populated at startBuild dispatch
   amount_gross_cents         Int?
   amount_creator_net_cents   Int? // 90% net of Stripe fee
   amount_platform_net_cents  Int? // 10% net of Stripe fee

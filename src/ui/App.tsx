@@ -3,6 +3,8 @@
 
 import { Routes, Route, Navigate } from 'react-router-dom';
 import SignIn from './SignIn';
+import Backdoor from './Backdoor';
+import AuthCallback from './AuthCallback';
 import ImagePage from './Image';
 import CreatorPage from './Creator';
 import ProfilePage from './Profile';
@@ -14,6 +16,8 @@ export default function App() {
   return (
     <Routes>
       <Route path="/signin" element={<SignIn />} />
+      <Route path="/backdoor" element={<Backdoor />} />
+      <Route path="/auth/callback" element={<AuthCallback />} />
       <Route path="/creator" element={<CreatorPage />} />
       <Route path="/creator/profile" element={<ProfilePage />} />
       <Route path="/collection" element={<CollectionPage />} />

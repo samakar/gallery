@@ -4,10 +4,13 @@
 //
 // Grid of deeds the signed-in user owns. Each tile shows the Share Copy as
 // thumbnail and links to the image page (where the owner sees the OwnerBar).
-// Source: deeds where owner_wallet_address == session.wallet_address.
+// Source: GET /v1/me/collection -- server joins deeds by owner_id from the
+// authenticated session (Bearer DID token or x-dev-user shim).
 
 import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
+import { api } from './api';
+import { SignOutButton } from './SignOutButton';
 
 interface OwnedDeed {
     image_id: string;
@@ -19,33 +22,40 @@ interface OwnedDeed {
     deed_state: 'sealed' | 'opened' | 'rights_disputed' | 'void' | 'burned';
 }
 
-const USE_MOCK = true;
-
 export default function CollectionPage() {
     const [deeds, setDeeds] = useState<OwnedDeed[]>([]);
     const [loading, setLoading] = useState(true);
+    const [error, setError] = useState<string | null>(null);
 
     useEffect(() => {
-        if (USE_MOCK) {
-            setDeeds(makeMockDeeds());
-            setLoading(false);
-            return;
-        }
-        // TODO: GET /v1/me/collection (R71 §3.7 row TBD)
-        // TODO: backend joins deeds.owner_wallet_address == session.wallet_address
+        let cancelled = false;
+        api<{ deeds: OwnedDeed[] }>('/v1/me/collection')
+            .then(d => { if (!cancelled) setDeeds(d.deeds); })
+            .catch(e => { if (!cancelled) setError(e?.message ?? 'Failed to load collection.'); })
+            .finally(() => { if (!cancelled) setLoading(false); });
+        return () => { cancelled = true; };
     }, []);
 
     return (
         <main className="min-h-screen mx-auto max-w-6xl px-4 py-8 lg:py-12 space-y-8">
-            <header className="space-y-1">
-                <h1 className="text-2xl font-light tracking-tight">Your collection</h1>
-                <p className="text-sm text-base-content/60">
-                    Images you own. Tap any tile to view, share, or open the deed.
-                </p>
+            <header className="flex items-start justify-between gap-4">
+                <div className="space-y-1 min-w-0">
+                    <h1 className="text-2xl font-light tracking-tight">Your collection</h1>
+                    <p className="text-sm text-base-content/60">
+                        Images you own. Tap any tile to view, share, or open the deed.
+                    </p>
+                </div>
+                <SignOutButton />
             </header>
 
             {loading ? (
                 <span className="loading loading-spinner" />
+            ) : error ? (
+                <div className="card bg-base-200">
+                    <div className="card-body items-center text-center">
+                        <p className="text-sm text-error">{error}</p>
+                    </div>
+                </div>
             ) : deeds.length === 0 ? (
                 <EmptyState />
             ) : (
@@ -102,29 +112,3 @@ function DeedGrid({ deeds }: { deeds: OwnedDeed[] }) {
     );
 }
 
-// -------------------------------------------------------------------
-// DEV mock
-// -------------------------------------------------------------------
-
-function makeMockDeeds(): OwnedDeed[] {
-    return [
-        {
-            image_id: 'abc1d',
-            title: 'After the rain',
-            creator_display_name: 'Sample Creator',
-            share_copy_url: 'https://placehold.co/600x600/eee/aaa?text=Share',
-            mint_address: 'MintAddr1111111111111111111111111111111111',
-            minted_at: '2026-05-01',
-            deed_state: 'sealed',
-        },
-        {
-            image_id: 'k7p2m',
-            title: 'Northbound',
-            creator_display_name: 'Another Creator',
-            share_copy_url: 'https://placehold.co/600x600/eee/aaa?text=Share',
-            mint_address: 'MintAddr2222222222222222222222222222222222',
-            minted_at: '2026-04-18',
-            deed_state: 'sealed',
-        },
-    ];
-}

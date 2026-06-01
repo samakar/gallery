@@ -9,6 +9,7 @@
 
 import { useEffect, useState } from 'react';
 import { api } from './api';
+import { SignOutButton } from './SignOutButton';
 
 interface PendingReview {
     image_id: string;
@@ -44,11 +45,14 @@ export default function AdminReviewsPage() {
 
     return (
         <main className="min-h-screen mx-auto max-w-4xl px-4 py-8 lg:py-12 space-y-8">
-            <header className="space-y-1">
-                <h1 className="text-2xl font-light tracking-tight">Review queue</h1>
-                <p className="text-sm text-base-content/60">
-                    Two checks per image. Both must pass to approve. Either unchecked rejects.
-                </p>
+            <header className="flex items-start justify-between gap-4">
+                <div className="space-y-1 min-w-0">
+                    <h1 className="text-2xl font-light tracking-tight">Review queue</h1>
+                    <p className="text-sm text-base-content/60">
+                        Two checks per image. Both must pass to approve. Either unchecked rejects.
+                    </p>
+                </div>
+                <SignOutButton />
             </header>
 
             {error && <div className="alert alert-error text-sm">{error}</div>}
@@ -89,16 +93,16 @@ function ReviewCard({
 
     return (
         <li className="card bg-base-200">
-            <div className="card-body grid grid-cols-1 md:grid-cols-[200px_1fr] gap-6">
+            <div className="card-body grid grid-cols-1 md:grid-cols-[200px_minmax(0,1fr)] gap-6">
                 <img
                     src={review.preview_url}
                     alt={review.title}
                     className="w-full aspect-square object-cover rounded-md"
                 />
-                <div className="space-y-4">
+                <div className="space-y-4 min-w-0">
                     <header className="space-y-0.5">
-                        <h2 className="text-base font-light">{review.title}</h2>
-                        <p className="text-xs text-base-content/60">
+                        <h2 className="text-base font-light truncate" title={review.title}>{review.title}</h2>
+                        <p className="text-xs text-base-content/60 truncate">
                             {review.creator_display_name} ·{' '}
                             <code className="font-mono">{review.image_id}</code>
                         </p>
@@ -108,26 +112,26 @@ function ReviewCard({
                     </header>
 
                     <div className="space-y-2">
-                        <label className="label cursor-pointer justify-start gap-3">
+                        <label className="cursor-pointer flex items-start gap-3 py-1">
                             <input
                                 type="checkbox"
-                                className="checkbox checkbox-sm"
+                                className="checkbox checkbox-sm mt-0.5 shrink-0"
                                 checked={abuseClear}
                                 onChange={e => setAbuseClear(e.target.checked)}
                             />
-                            <span className="label-text">
+                            <span className="label-text whitespace-normal">
                                 Abuse-clear -- no CSAM, no non-consensual nudity, no
                                 weaponized content
                             </span>
                         </label>
-                        <label className="label cursor-pointer justify-start gap-3">
+                        <label className="cursor-pointer flex items-start gap-3 py-1">
                             <input
                                 type="checkbox"
-                                className="checkbox checkbox-sm"
+                                className="checkbox checkbox-sm mt-0.5 shrink-0"
                                 checked={rightsClear}
                                 onChange={e => setRightsClear(e.target.checked)}
                             />
-                            <span className="label-text">
+                            <span className="label-text whitespace-normal">
                                 Rights-clear -- creator appears to own all depicted IP
                                 and likenesses
                             </span>

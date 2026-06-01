@@ -28,3 +28,10 @@ Thumbs.db
 .vscode/
 .idea/
 *.swp
+
+# Generated test fixtures -- regenerable via `npx tsx fixtures/build.ts`
+fixtures/**/*.jpg
+fixtures/**/*.png
+
+# Hand-collected fixtures (phone photos with real EXIF) -- committed
+!fixtures/cloudinary/PXL_*.jpg

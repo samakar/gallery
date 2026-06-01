@@ -1,6 +1,6 @@
 # Crossmint Dispatch (Registry)
 
-Mint deed via the Crossmint Minting API. Embeds `arweave_uri`, `enc_final`, `sha256` (M+00 anchor), royalty fields from `rights.getDeedRightsParams`, and `license_acceptance_signing_event_id` into the deed metadata. Returns the Crossmint mint job id immediately; the terminal `minting → confirmed/failed` transition arrives via `crossmint_webhook`. Called by Commerce's `run_image_ops` at step (e).
+Mint deed via the Crossmint Minting API. Embeds `arweave_uri`, `enc_final`, `sha256` + `phash` (M+00 dual anchors per R62 §4.3 / [ADR-0005](../adr/adr_0005_phash_in_deed_and_uniqueness_gate.md)), royalty fields from `rights.getDeedRightsParams`, and `license_acceptance_signing_event_id` into the deed metadata. Returns the Crossmint mint job id immediately; the terminal `minting → confirmed/failed` transition arrives via `crossmint_webhook`. Called by Commerce's `run_image_ops` at step (e).
 
 ## 1. Interface
 
@@ -12,7 +12,8 @@ Mint deed via the Crossmint Minting API. Embeds `arweave_uri`, `enc_final`, `sha
 | image_id | string(5) | |
 | buyer_wallet_pubkey | string | Solana base58 |
 | arweave_uri | string | from `arweave_master` |
-| sha256 | string | hex; from `arweave_master`; M+00 anchor |
+| sha256 | string | hex; from `arweave_master`; M+00 anchor (canonical-pixels sha256) |
+| phash | string | 16-char hex; from `arweave_master` (read-through of `images.phash`); M+00 perceptual anchor per [ADR-0005](../adr/adr_0005_phash_in_deed_and_uniqueness_gate.md) |
 | enc_final | string | base64; from `arweave_master` |
 | license_signing_event_id | UUID | from per-image License Acceptance ESIGN |
 
@@ -67,7 +68,7 @@ Mint deed via the Crossmint Minting API. Embeds `arweave_uri`, `enc_final`, `sha
       "deed_state": "sealed",
       "royalty_pct": 10,
       "royalty_recipients": [{ "address": "<creator_wallet>", "share": 100 }],
-      "variant_hashes": { "M+00": { "sha256": "<sha256>", "anchored_at": "<mint_tx_block_time>" } },
+      "variant_hashes": { "M+00": { "sha256": "<sha256>", "phash": "<phash>", "anchored_at": "<mint_tx_block_time>" } },
       "license_acceptance_signing_event_id": "<license_signing_event_id>"
     }
   }
@@ -110,7 +111,7 @@ Solana network fee for the mint is paid by the platform from the 10% net (R71 §
 |---|---|
 | Crossmint Minting API client (R71 §3.2) | mint job dispatch |
 | `rights.getDeedRightsParams` (Commerce) | royalty + edition params |
-| `arweave_master` (predecessor) | provides `arweave_uri`, `sha256`, `enc_final` |
+| `arweave_master` (predecessor) | provides `arweave_uri`, `sha256`, `phash`, `enc_final` |
 | `crossmint_webhook` (successor) | receives terminal state |
 | `process.env.CROSSMINT_API_KEY` | API auth |
 | `process.env.CROSSMINT_COLLECTION_ID` | collection scope |
@@ -136,6 +137,8 @@ Solana network fee for the mint is paid by the platform from the 10% net (R71 §
 | R71 §3.3 Crossmint | Vendor contract + metadata schema |
 | R62 §2.3 Registry | deed metadata structure |
 | R62 §3.5.1 | deed_state field at mint |
+| R62 §4.3 line 493 | Firm deed-content fields: sha256 + phash dual anchors |
+| **ADR-0005** | phash in deed restored to MVP per R62 §4.3 |
 
 ---
-*Last Updated: 05/29/26 17:00*
+*Last Updated: 05/29/26 17:30*

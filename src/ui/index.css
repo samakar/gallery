@@ -2,3 +2,18 @@
 @plugin "daisyui" {
   themes: lofi --default;
 }
+
+/* Gallery register (R62 §4.3 typography): EB Garamond for deed instruments
+   (COA + Deed panels, deed-content page). Applied via the .font-deed utility. */
+.font-deed {
+  font-family: "EB Garamond", Georgia, "Times New Roman", serif;
+  font-size: 0.95rem;
+  line-height: 1.55;
+}
+.font-deed code,
+.font-deed .font-mono {
+  /* Keep hashes / addresses monospace even inside a Garamond block --
+     URL-text register (R62 §4.3) is IBM Plex Mono / monospace for hashes. */
+  font-family: ui-monospace, SFMono-Regular, "SF Mono", Menlo, monospace;
+  font-size: 0.85em;
+}

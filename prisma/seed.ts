@@ -63,18 +63,14 @@ async function main() {
         update: {},
     });
 
-    // Images
+    // One-time cleanup of the abandoned 'abc1d' fixture (no real Cloudinary
+    // asset uploaded; rendered as broken image). Idempotent: safe to leave in
+    // even after the row is gone.
+    await prisma.deed.deleteMany({ where: { image_id: 'abc1d' } });
+    await prisma.purchase.deleteMany({ where: { image_id: 'abc1d' } });
+    await prisma.image.deleteMany({ where: { image_id: 'abc1d' } });
+
     const images = [
-        {
-            image_id: 'abc1d',
-            title: 'After the rain',
-            description:
-                'A short first-person artist statement about this work. Two or three sentences in the creator\'s voice.',
-            status: 'live',
-            visibility: 'public',
-            listed_price: 24000,
-            creation_date: new Date('2026-04-15'),
-        },
         {
             image_id: 'k7p2m',
             title: 'Northbound',
@@ -90,7 +86,7 @@ async function main() {
             description: 'Submitted for review.',
             status: 'pending_review',
             visibility: 'private',
-            listed_price: 0,
+            listed_price: 1000,  // $10 default per metadata.md §2.1
             creation_date: new Date('2026-05-20'),
         },
     ];
@@ -102,7 +98,7 @@ async function main() {
         });
     }
 
-    // Deed for the sold image
+    // Deed for the seeded sold image (separate from the resettable ones).
     await prisma.deed.upsert({
         where: { image_id: 'k7p2m' },
         create: {

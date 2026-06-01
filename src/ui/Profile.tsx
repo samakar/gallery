@@ -1,19 +1,19 @@
 // Profile.tsx
-// Creator profile read-only view (R71 §3.4).
-// Source: GET /v1/creator/profile.
+// Creator profile -- editable.
+// Source: GET /v1/creator/profile, PATCH /v1/creator/profile,
+//         POST /v1/creator/profile/headshot.
 //
-// Fields per /docs/cert/identity.md §2.7 are captured at CMA signing (Card 1
-// ESIGN). MVP shows whatever was captured; no edit affordance until an
-// "update profile" workflow exists (deferred).
+// Form fields auto-save on Back-to-grid (matches the image editor pattern).
+// Headshot uploads immediately (no draft state -- a new upload IS the change).
+// entity_type is CMA/KYC data, not shown here per product decision.
 
-import { useEffect, useState } from 'react';
-import { Link } from 'react-router-dom';
+import { useEffect, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import { api } from './api';
 
 interface Profile {
     display_name: string;
     legal_name: string;
-    entity_type: string;
     youtube_channel_handle: string;
     creator_bio: string | null;
     creator_headshot_url: string | null;
@@ -24,58 +24,257 @@ export default function ProfilePage() {
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
 
-    useEffect(() => {
-        api<{ profile: Profile }>('/v1/creator/profile')
-            .then(r => setProfile(r.profile))
-            .catch(e => setError(e.message))
-            .finally(() => setLoading(false));
-    }, []);
+    const load = async () => {
+        try {
+            const r = await api<{ profile: Profile }>('/v1/creator/profile');
+            setProfile(r.profile);
+        } catch (e) {
+            setError(e instanceof Error ? e.message : String(e));
+        } finally {
+            setLoading(false);
+        }
+    };
 
-    return (
-        <main className="min-h-screen mx-auto max-w-3xl px-4 py-8 lg:py-12 space-y-8">
-            <header className="flex items-center justify-between pb-4 border-b border-base-300">
-                <h1 className="text-2xl font-light tracking-tight">Profile</h1>
-                <Link to="/creator" className="link link-hover text-sm">
-                    ← Back to grid
-                </Link>
-            </header>
-            {loading ? (
+    useEffect(() => { load(); }, []);
+
+    if (loading) {
+        return (
+            <main className="min-h-screen flex items-center justify-center">
                 <span className="loading loading-spinner" />
-            ) : error ? (
-                <div className="alert alert-error text-sm">{error}</div>
-            ) : profile ? (
-                <ProfileView profile={profile} />
-            ) : null}
+            </main>
+        );
+    }
+    if (error) {
+        return (
+            <main className="min-h-screen flex items-center justify-center px-4">
+                <div className="alert alert-error text-sm max-w-md">{error}</div>
+            </main>
+        );
+    }
+    if (!profile) return null;
+
+    return <ProfileEditor profile={profile} onChanged={load} />;
+}
+
+function ProfileEditor({ profile, onChanged }: { profile: Profile; onChanged: () => void }) {
+    const navigate = useNavigate();
+    const headshotRef = useRef<HTMLInputElement>(null);
+
+    const [displayName, setDisplayName] = useState(profile.display_name);
+    const [legalName, setLegalName] = useState(profile.legal_name);
+    const [youtube, setYoutube] = useState(profile.youtube_channel_handle);
+    const [bio, setBio] = useState(profile.creator_bio || '');
+
+    const [saving, setSaving] = useState(false);
+    const [uploading, setUploading] = useState(false);
+    const [err, setErr] = useState<string | null>(null);
+
+    const dirty =
+        displayName !== profile.display_name ||
+        legalName !== profile.legal_name ||
+        youtube !== profile.youtube_channel_handle ||
+        bio !== (profile.creator_bio || '');
+
+    async function persistProfile() {
+        await api('/v1/creator/profile', {
+            method: 'PATCH',
+            body: JSON.stringify({
+                display_name: displayName,
+                legal_name: legalName,
+                youtube_channel_handle: youtube,
+                creator_bio: bio,
+            }),
+        });
+    }
+
+    async function backToGrid() {
+        if (!dirty) {
+            navigate('/creator');
+            return;
+        }
+        setSaving(true);
+        setErr(null);
+        try {
+            await persistProfile();
+            navigate('/creator');
+        } catch (e) {
+            setErr(e instanceof Error ? e.message : String(e));
+            setSaving(false);
+        }
+    }
+
+    async function onPickHeadshot(e: React.ChangeEvent<HTMLInputElement>) {
+        const file = e.target.files?.[0];
+        if (!file) return;
+        setUploading(true);
+        setErr(null);
+        try {
+            // Mirror the server cap (5 MB) -- a 200×200 delivery doesn't
+            // justify wasting bandwidth on a multi-MB upload.
+            const MAX_BYTES = 5 * 1024 * 1024;
+            if (file.size > MAX_BYTES) {
+                setErr(`Headshot must be under 5 MB. Yours is ${(file.size / 1024 / 1024).toFixed(1)} MB.`);
+                return;
+            }
+            // Reject under-size headshots before sending to the server.
+            const dims = await readDims(file);
+            if (dims.width < 200 || dims.height < 200) {
+                setErr(`Headshot must be at least 200×200 px. Yours is ${dims.width}×${dims.height}.`);
+                return;
+            }
+            const fd = new FormData();
+            fd.append('file', file);
+            await api('/v1/creator/profile/headshot', { method: 'POST', body: fd });
+            onChanged();
+        } catch (e2) {
+            setErr(e2 instanceof Error ? e2.message : String(e2));
+        } finally {
+            setUploading(false);
+            if (headshotRef.current) headshotRef.current.value = '';
+        }
+    }
+
+    function BioCounter({ bio }: { bio: string }) {
+        const n = bio.trim().length;
+        const ok = n >= 40 && n <= 280;
+        return (
+            <p className={`text-xs ${ok ? 'text-base-content/40' : 'text-warning'}`}>
+                {n} / 40-280 chars
+            </p>
+        );
+    }
+
+    function readDims(file: File): Promise<{ width: number; height: number }> {
+        return new Promise((resolve, reject) => {
+            const url = URL.createObjectURL(file);
+            const img = new Image();
+            img.onload = () => {
+                URL.revokeObjectURL(url);
+                resolve({ width: img.naturalWidth, height: img.naturalHeight });
+            };
+            img.onerror = () => {
+                URL.revokeObjectURL(url);
+                reject(new Error('Could not read image. Try a different file.'));
+            };
+            img.src = url;
+        });
+    }
+
+    return (
+        <main className="min-h-screen mx-auto max-w-3xl px-4 py-8 lg:py-10 space-y-3">
+            {/* Row 1: title | back-to-grid */}
+            <div className="grid grid-cols-2 gap-3">
+                <div className="bg-base-200 rounded-md px-4 py-2 text-sm font-light">
+                    Profile
+                </div>
+                <button
+                    type="button"
+                    onClick={backToGrid}
+                    disabled={saving || uploading}
+                    className="bg-base-200 rounded-md px-4 py-2 text-sm hover:bg-base-300 disabled:opacity-60"
+                >
+                    {saving ? 'Saving…' : '← back to grid'}
+                </button>
+            </div>
+
+            {/* Headshot + form */}
+            <div className="grid grid-cols-1 md:grid-cols-[200px_1fr] gap-4">
+                <section className="space-y-2">
+                    <div className="bg-base-200 rounded-md overflow-hidden aspect-square">
+                        {profile.creator_headshot_url ? (
+                            <img
+                                src={profile.creator_headshot_url}
+                                alt={displayName}
+                                className="w-full h-full object-cover"
+                            />
+                        ) : (
+                            <div className="w-full h-full flex flex-col items-center justify-center text-center gap-1 px-2">
+                                <span className="text-base-content/40 text-sm">no photo</span>
+                                <span className="text-base-content/40 text-xs">
+                                    (min 200×200 px headshot)
+                                </span>
+                            </div>
+                        )}
+                    </div>
+                    <input
+                        ref={headshotRef}
+                        type="file"
+                        accept="image/jpeg,image/png"
+                        onChange={onPickHeadshot}
+                        disabled={uploading}
+                        className="file-input file-input-bordered file-input-sm w-full bg-base-200"
+                    />
+                    {uploading && (
+                        <p className="text-xs text-base-content/60">Uploading…</p>
+                    )}
+                </section>
+
+                <section className="space-y-3">
+                    <label className="grid grid-cols-[110px_1fr] gap-3 items-center">
+                        <span className="text-sm text-base-content/60 text-right">Display name</span>
+                        <input
+                            title="Display name -- shown on your image pages"
+                            type="text"
+                            placeholder="display name"
+                            spellCheck
+                            autoCapitalize="words"
+                            autoCorrect="on"
+                            lang="en"
+                            value={displayName}
+                            onChange={e => setDisplayName(e.target.value)}
+                            className="input input-bordered bg-base-200 w-full"
+                        />
+                    </label>
+                    <label className="grid grid-cols-[110px_1fr] gap-3 items-center">
+                        <span className="text-sm text-base-content/60 text-right">Legal name</span>
+                        <input
+                            title="Legal name -- for KYC and royalty disbursement"
+                            type="text"
+                            placeholder="legal name"
+                            autoCapitalize="words"
+                            autoCorrect="off"
+                            spellCheck={false}
+                            value={legalName}
+                            onChange={e => setLegalName(e.target.value)}
+                            className="input input-bordered bg-base-200 w-full"
+                        />
+                    </label>
+                    <label className="grid grid-cols-[110px_1fr] gap-3 items-center">
+                        <span className="text-sm text-base-content/60 text-right">YouTube</span>
+                        <input
+                            title="YouTube channel handle -- e.g. @samplecreator"
+                            type="text"
+                            placeholder="@youtube"
+                            autoCapitalize="none"
+                            autoCorrect="off"
+                            spellCheck={false}
+                            value={youtube}
+                            onChange={e => setYoutube(e.target.value)}
+                            className="input input-bordered bg-base-200 w-full"
+                        />
+                    </label>
+                    <label className="grid grid-cols-[110px_1fr] gap-3 items-start">
+                        <span className="text-sm text-base-content/60 text-right pt-3">Bio</span>
+                        <div className="space-y-1">
+                            <textarea
+                                title="Bio -- 40 to 280 characters; required before listing images"
+                                placeholder="bio (about you, your work)"
+                                rows={5}
+                                spellCheck
+                                autoCapitalize="sentences"
+                                autoCorrect="on"
+                                lang="en"
+                                value={bio}
+                                onChange={e => setBio(e.target.value)}
+                                className="textarea textarea-bordered bg-base-200 w-full"
+                            />
+                            <BioCounter bio={bio} />
+                        </div>
+                    </label>
+                </section>
+            </div>
+
+            {err && <div className="alert alert-error text-sm">{err}</div>}
         </main>
-    );
-}
-
-function ProfileView({ profile }: { profile: Profile }) {
-    return (
-        <section className="space-y-6">
-            {profile.creator_headshot_url && (
-                <img
-                    src={profile.creator_headshot_url}
-                    alt={profile.display_name}
-                    className="w-24 h-24 rounded-full object-cover"
-                />
-            )}
-            <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-3 text-sm">
-                <Row label="Display name" value={profile.display_name} />
-                <Row label="Legal name" value={profile.legal_name} />
-                <Row label="Entity type" value={profile.entity_type} />
-                <Row label="YouTube" value={profile.youtube_channel_handle} />
-                <Row label="Bio" value={profile.creator_bio ?? '—'} />
-            </dl>
-        </section>
-    );
-}
-
-function Row({ label, value }: { label: string; value: string }) {
-    return (
-        <>
-            <dt className="text-base-content/60">{label}</dt>
-            <dd>{value}</dd>
-        </>
     );
 }

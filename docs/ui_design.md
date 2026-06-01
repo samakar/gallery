@@ -24,11 +24,13 @@ Six registers; each has a specific typeface and scope. Mixing is disallowed.
 | Gallery | **EB Garamond Italic Regular** (Google Fonts) | Listing-preview "Epimage" watermark; Gallery brand wordmark | General UI copy; Creator Page |
 | Gallery-wall-label (monogram) | Restrained neutral grotesque OR text serif; warm off-white 75-85% opacity + soft drop shadow; cap-height ~27-32 px on 1080 px Share Copy | The buyer's monogram in-pixel on Keepsake Copy + Share Copy | Display, brand, script, calligraphy faces **prohibited** |
 | Museum-label | Institutional caption -- small, neutral, recessive | Image-page framing chrome (title, creator name, creation date, edition tier and number) | Hero; conversion bar |
-| URL-text (in-pixel) | **IBM Plex Mono** Medium/Semi-Bold; default slashed zero + distinct `1`/`l`; cap-height ~32-43 px on Share Copy; fixed light fill + ~2 px dark stroke | Lower-right vertical-edge URL on Share Copy | Proportional UI typefaces (Inter, Roboto) **excluded** -- disambiguating glyphs gated behind OpenType features Cloudinary can't reach |
+| URL-text (in-pixel) | **IBM Plex Mono** Medium/Semi-Bold (Google Fonts); default slashed zero + distinct `1`/`l`; cap-height ~32-43 px on Share Copy; fixed light fill + ~2 px dark stroke | Lower-right vertical-edge URL on Share Copy | Proportional UI typefaces (Inter, Roboto) **excluded** -- disambiguating glyphs gated behind OpenType features Cloudinary can't reach |
 | Social-promotion | -- (deliberately excluded throughout) | -- | Creator-presence block is gallery-register, not social-promotion |
 | URL-shortener | -- (deliberately excluded) | -- | Why `epimage.com` was picked over `jpg1.me`-class options |
 
 **General UI copy = DaisyUI `lofi` theme defaults**, NOT EB Garamond. R62 §4.3 explicitly: "the Creator Page UI follows the product's overall typography system, which is a separate decision from this composition spec."
+
+**In-pixel typography is delivered via Cloudinary's Google Fonts integration** (`<FontName>@google` syntax, released 2026-05-28) -- no custom font upload to Cloudinary needed. Implementation in [/src/commerce/image_gen.ts](../src/commerce/image_gen.ts). Watch-out: weight specifiers must be **numeric** (`font_weight: 500`), not named (`'medium'`) -- the Google Fonts CSS API rejects names.
 
 ## 3. Image Page Composition (R62 §4.3)
 
@@ -61,6 +63,8 @@ Same URL `epimage.com/<image-id>`; render branches on (`images.visibility`, sold
 | Default-public (post-sale) | visibility=public, sold=true | Share Copy variant + monogram + creator credit + "View deed" (no Buy) |
 | Default-private stub | visibility=private, viewer != owner | Blank card with lock icon + `image <image-id> is private`; no creator credit, no Buy, no Report; `<meta name="robots" content="noindex,nofollow">`; generic OG/Twitter Card |
 | Default-owner | viewer == current owner (any visibility) | Share Copy + deed metadata + Collection link + Share affordance (privacy-flip modal when private); "Click Share to make public" banner when private |
+| Owner-editable | is_creator AND status ∈ {pending_review, draft} | Metadata form (title, description, price, creation date) + Save changes + "Put on sale" CTA (greyed with checklist until moderated + complete); pending shows "Awaiting review" notice |
+| Owner-listed | is_creator AND status='live' | Read-only summary + "Take off sale to edit" CTA -- per [ADR-0003](adr/adr_0003_unlist_before_edit.md), live listings require an unlist transition before edits |
 | Buy state | "Own this" click | Checkout modal overlay; Stripe Embedded Checkout; bundled MJA + License Acceptance ESIGN click-wrap (first purchase) or License Acceptance only (returning); cancel returns to Default-public |
 | Confirmation state | post-Sign | Receipt summary + License Acceptance summary + deed details + Collection link |
 
@@ -121,4 +125,4 @@ Pre-purchase: shows the deed as it will be issued; the buyer reads TBD fields as
 | docs/sad.md §2.2 | Commerce catalog / presentation pointer |
 
 ---
-*Last Updated: 05/29/26 11:00*
+*Last Updated: 05/31/26 19:45*

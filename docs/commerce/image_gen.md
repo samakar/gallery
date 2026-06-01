@@ -129,7 +129,30 @@ Called internally by every `generate*` function and externally by Registry's `ar
 | Lifetime | Plaintext is in-flight only -- consumed by Cloudinary upload OR returned to caller; NEVER persisted to disk |
 
 ### 2.3 Listing preview (R71 §2.2 step 8; R62 §2.2)
-Cloudinary chain: `c_limit,w_1080,h_1080` → creator-credit text layer → centered italic "Epimage" outline watermark (EB Garamond Italic, ~5% opacity per R62 §2.2 lines 74-82) → `q_auto:good,f_jpg`.
+Cloudinary chain: `c_limit,f_auto,q_auto,w_1080` → centered italic "Epimage" watermark (EB Garamond Italic via Google Fonts integration; **see §2.3.1 R62 divergence note below**) → URL text on lower-right vertical edge `epima.ge-<image_id>` rotated -90° (IBM Plex Mono Medium per R62 §4.3 URL-text register; white fill + 2 px black glyph stroke via `font_style: 'stroke'` modifier) → lower-left edition mark `1 of 1` (EB Garamond Italic + soft drop shadow per R62 §4.3 gallery-wall-label register). On Share Copy post-purchase the edition slot becomes `1 of 1 <buyer_monogram>` per ADR-0002. URL + edition mark on Listing Preview is a divergence from R62 §4.3 (which places them on Share Copy only); the rationale is faithful pre-purchase preview + anti-piracy attribution on public listings.
+
+#### 2.3.1 Watermark divergence from R62 §2.2
+
+R62 §2.2 specifies the Epimage wordmark as an **outline watermark** -- hollow letterforms with transparent fill and a visible outline. The MVP implementation diverges: the wordmark renders as **low-opacity (30%) translucent fill in EB Garamond Italic + 8 px white outer outline**, not truly hollow.
+
+| | R62 §2.2 spec | MVP implementation |
+|---|---|---|
+| Fill | Transparent (image visible through glyph centers) | Partially-translucent white (~30% opacity layer) |
+| Outline | Thin visible outline traces glyph silhouette | 8 px white outer outline (`e_outline:outer:8:co_white`) |
+| Net visual | Hollow letters with crisp outline | Low-opacity ghosted wordmark with heavier outline |
+| Anti-piracy function | Same | Same |
+
+**Why diverged**: Cloudinary's text overlay engine doesn't fully honor `co_transparent` or RGBA `co_rgb:FFFFFF00` on text overlays -- the fill stays partially opaque regardless of the alpha specification. We confirmed this empirically through multiple syntactic variations including `raw_transformation` segments and `font_style: 'italic_stroke'`. Only `font_style: 'stroke'` produced truly hollow text, but that modifier consumes the `font_style` slot and forced dropping italic, which conflicts with R62's "centered italic" requirement.
+
+**Three paths to restore the R62-spec rendering** (not in MVP scope):
+
+1. **Hand-built URL string** -- bypass the Cloudinary Node SDK and assemble the transformation URL by string concatenation with the exact segment ordering Cloudinary's parser requires for the `co_transparent` + `e_outline` combination to bind to the text layer (rather than to the base image).
+2. **Cloudinary SDK upgrade** -- when the SDK supports overlay-scoped effect-param binding (currently effect / color params at the layer level are serialized before the `l_text:` declaration, applying them to the base image not the text), the high-level API can produce the right URL directly.
+3. **Pre-rasterized PNG overlay** -- generate the hollow Epimage wordmark as a transparent PNG once (e.g. via Figma export), upload to Cloudinary as a regular image asset, and reference via `l_<asset_id>` rather than `l_text:`. Bypasses the text-overlay engine entirely.
+
+**MVP decision**: ship the low-opacity-translucent approximation. The wordmark's product purposes (subtle Epimage branding, integrity hint for screenshots circulating outside the platform) are met. The R62-perfect outline is a typography refinement that gates none of the listing flow's behavior.
+
+**Fonts via Cloudinary Google Fonts integration (released 2026-05-28)**: reference Google Fonts directly with `<FontName>@google` syntax -- no custom-font upload to Cloudinary needed. EB Garamond uses `font_family: 'EB Garamond@google'` + `font_style: 'italic'`; IBM Plex Mono uses `font_family: 'IBM Plex Mono@google'` + `font_weight: 500` (Google Fonts API requires **numeric** weights -- passing `'medium'` as a string returns 400 from Google Fonts CSS API). Cloudinary fetches fonts from Google's CDN at first delivery, rasterizes the overlay, and CDN-caches the derived asset. Subsequent requests are edge-cached.
 
 ### 2.4 Thumbnail (R71 §2.2 step 8)
 Cloudinary chain: `c_limit,w_500` → `q_70,f_jpg`. Aspect-preserving; unwatermarked; 500 px long-edge.
@@ -139,7 +162,7 @@ Cloudinary chain: `c_limit,w_500` → `q_70,f_jpg`. Aspect-preserving; unwaterma
 | Step | Detail |
 |---|---|
 | Format | Orientation-driven: landscape → 1080×566, square → 1080×1080, portrait → 1080×1350 |
-| Chain | `c_fill,g_auto,w_1080,h_<format>` (AI-driven gravity) → monogram layer (gallery-wall-label register per R62 §2.2; warm off-white 75-85% opacity + soft drop shadow) → URL-text layer per R62 §7.6 (IBM Plex Mono Medium / Semi-Bold, rotated 90°, lower-right vertical edge, slashed zero, fixed light fill + ~2 px dark stroke, cap-height ~3-4% of width) → `q_85,f_jpg` |
+| Chain | `c_fill,g_auto,w_1080,h_<format>` (AI-driven gravity) → buyer-monogram layer (`EB Garamond@google` + `font_style: 'italic'`; gallery-wall-label register per R62 §2.2; warm off-white 75-85% opacity + soft drop shadow; replaces the platform "E" carried on Listing Preview) → URL-text layer per R62 §7.6 (`IBM Plex Mono@google` + `font_weight: 500`, rotated -90°, lower-right vertical edge, slashed zero, fixed light fill + ~2 px dark stroke, cap-height ~3-4% of width) → `q_85,f_jpg` |
 | Recompression | Q85 chosen because social platforms recompress on upload; higher is wasted bandwidth |
 | Delivery | Cloudinary CDN is canonical for both public-page render and any signed-download retrieval. **This module does not cache locally** -- if deed-holder downloads require caching, the renderer (TBD) handles that lazily |
 
@@ -230,4 +253,4 @@ This module is the only place that talks to Cloudinary. Callers consume the retu
 | docs/ui_design.md | Render-side surfaces consuming these variants |
 
 ---
-*Last Updated: 05/29/26 15:00*
+*Last Updated: 05/31/26 20:55*

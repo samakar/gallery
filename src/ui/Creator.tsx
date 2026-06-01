@@ -12,6 +12,7 @@ import { useEffect, useState } from 'react';
 import { Link } from 'react-router-dom';
 import { api } from './api';
 import UploadDrawer, { type UploadedImage } from './UploadDrawer';
+import { SignOutButton } from './SignOutButton';
 
 interface Listing {
     image_id: string;
@@ -25,13 +26,20 @@ interface Listing {
 
 export default function CreatorPage() {
     const [listings, setListings] = useState<Listing[]>([]);
+    const [displayName, setDisplayName] = useState<string>('');
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
     const [drawerOpen, setDrawerOpen] = useState(false);
 
     useEffect(() => {
-        api<{ listings: Listing[] }>('/v1/creator/listings')
-            .then(r => setListings(r.listings))
+        Promise.all([
+            api<{ listings: Listing[] }>('/v1/creator/listings'),
+            api<{ profile: { display_name: string } }>('/v1/creator/profile'),
+        ])
+            .then(([l, p]) => {
+                setListings(l.listings);
+                setDisplayName(p.profile.display_name || '');
+            })
             .catch(e => setError(e.message))
             .finally(() => setLoading(false));
     }, []);
@@ -40,9 +48,11 @@ export default function CreatorPage() {
         setListings(prev => [img, ...prev]);
     }
 
+    const title = displayName ? `${displayName} Folio` : 'Folio';
+
     return (
         <main className="min-h-screen mx-auto max-w-6xl px-4 py-8 lg:py-12 space-y-8">
-            <TopNav onUploadClick={() => setDrawerOpen(true)} />
+            <TopNav title={title} onUploadClick={() => setDrawerOpen(true)} />
 
             {error ? (
                 <div className="alert alert-error text-sm">{error}</div>
@@ -63,14 +73,15 @@ export default function CreatorPage() {
     );
 }
 
-function TopNav({ onUploadClick }: { onUploadClick: () => void }) {
+function TopNav({ title, onUploadClick }: { title: string; onUploadClick: () => void }) {
     return (
         <header className="flex items-center justify-between pb-4 border-b border-base-300">
-            <h1 className="text-2xl font-light tracking-tight">Your work</h1>
-            <nav className="flex items-center gap-2">
+            <h1 className="text-2xl font-light tracking-tight truncate">{title}</h1>
+            <nav className="flex items-center gap-2 shrink-0">
                 <Link to="/creator/profile" className="btn btn-sm btn-ghost">
                     Profile
                 </Link>
+                <SignOutButton />
                 <button type="button" className="btn btn-sm" onClick={onUploadClick}>
                     Upload
                 </button>

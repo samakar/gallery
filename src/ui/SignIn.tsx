@@ -1,24 +1,46 @@
 // SignIn.tsx
-// MVP Sign-in page (R71 §3.4 row 1).
-// Design ref: /docs/ui_design.md §1 (lofi theme), §7 (/signin route).
-//
-// Real Magic SDK OAuth (Google / Apple) is TODO per R71 §2.1 / §3.3. Until then,
-// three dev-persona buttons set localStorage['dev-user'] and route to the
-// appropriate landing page; the api.ts wrapper forwards that as `x-dev-user`
-// to the Express server's auth shim.
+// Production sign-in page (R71 §3.4 row 1). Google OAuth via Magic, nothing
+// else. Auto-fires the redirect on mount -- the visitor came here to sign in,
+// no reason to make them click again. /backdoor holds the dev shortcuts.
 
-import { useNavigate } from 'react-router-dom';
-import { setPersona, type DevPersona } from './api';
+import { useEffect, useRef, useState } from 'react';
+import { useSearchParams } from 'react-router-dom';
+import { magic } from './magic';
+
+// sessionStorage key carrying the post-signin return URL through the Magic
+// OAuth round-trip (the redirect leaves the page, React state would die).
+const RETURN_KEY = 'post-signin-return';
 
 export default function SignIn() {
-  const navigate = useNavigate();
+  const [searchParams] = useSearchParams();
+  const returnTo = searchParams.get('return');
+  const [error, setError] = useState<string | null>(null);
 
-  function signInAs(persona: DevPersona) {
-    setPersona(persona);
-    if (persona === 'creator') navigate('/creator');
-    else if (persona === 'buyer') navigate('/collection');
-    else navigate('/admin/reviews');
-  }
+  // Auto-fire Google OAuth on mount. Ref-guarded against StrictMode double-effect.
+  const startedRef = useRef(false);
+  useEffect(() => {
+    if (startedRef.current) return;
+    startedRef.current = true;
+    (async () => {
+      try {
+        if (returnTo) sessionStorage.setItem(RETURN_KEY, returnTo);
+        else sessionStorage.removeItem(RETURN_KEY);
+        await magic.oauth2.loginWithRedirect({
+          provider: 'google',
+          redirectURI: `${window.location.origin}/auth/callback`,
+        });
+      } catch (e: any) {
+        const raw = String(e?.message ?? e ?? '');
+        const code = e?.code as number | undefined;
+        const friendly =
+          code === -32603 || raw.includes('RPC route not enabled') || raw.includes('provider not supported')
+            ? 'Google sign-in is not yet configured. Contact support.'
+            : raw || 'Sign-in failed. Try again.';
+        setError(friendly);
+      }
+    })();
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   return (
     <main className="min-h-screen flex items-center justify-center px-4">
@@ -27,37 +49,23 @@ export default function SignIn() {
           <header>
             <h1 className="text-2xl font-light">Sign in to Epimage</h1>
             <p className="text-sm text-base-content/60 mt-1">
-              Dev mode -- pick a persona to continue.
+              {error ? 'There was a problem signing you in.' : 'Redirecting to Google…'}
             </p>
           </header>
-
-          <div className="flex flex-col gap-2 w-full">
-            <button
-              type="button"
-              onClick={() => signInAs('creator')}
-              className="btn btn-block"
-            >
-              Sign in as Creator
-            </button>
-            <button
-              type="button"
-              onClick={() => signInAs('buyer')}
-              className="btn btn-block"
-            >
-              Sign in as Buyer
-            </button>
-            <button
-              type="button"
-              onClick={() => signInAs('admin')}
-              className="btn btn-block btn-neutral"
-            >
-              Sign in as Admin
-            </button>
-          </div>
-
-          <p className="text-xs text-base-content/40">
-            Magic OAuth (Google / Apple) -- TODO
-          </p>
+          {error ? (
+            <>
+              <p className="text-sm text-error">{error}</p>
+              <button
+                type="button"
+                onClick={() => window.location.reload()}
+                className="btn btn-block"
+              >
+                Try again
+              </button>
+            </>
+          ) : (
+            <span className="loading loading-spinner" />
+          )}
         </div>
       </div>
     </main>

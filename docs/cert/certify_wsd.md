@@ -21,11 +21,13 @@ Per-asset workflow that gates a creator-uploaded image through the Certification
 | 4 | Image enters moderator review queue | (no call; `status='pending_review'` IS the queue) | -- | Visible at GET /v1/admin/reviews (R71 §3.7 row 6a) | -- |
 | 5 | Moderator submits two-checkbox review | Web App (admin) at POST /v1/admin/reviews/:imageId (R71 §3.7 row 6b) | moderation.submitModeration({tier0_clean, tier1_clean}) | `image_reviews` row + `images.status` transition | REVIEW_TIER0_VIOLATION / REVIEW_TIER1_VIOLATION |
 | 6 | (On approve) Creator notified | Email subsystem (TBD) | -- | Creator dashboard surfaces resume-listing link | -- |
-| 7 | Creator ESIGN affirmation (ISA) | Web App at POST /v1/creator/uploads/:imageId/sign-affirmation (R71 §3.7 row 7) | esign.captureSignature(ISA) | `signatures` row + `images.signing_event_id_authorship` stamped | ESIGN_DOCUMENT_REQUIRED if precondition fails |
+| 7 | Creator ESIGN affirmation (ISA) -- **parallel to steps 4-5 per [ADR-0006](../adr/adr_0006_isa_decoupled_from_moderation.md)**: may execute any time after step 3, while `status ∈ {pending_review, draft}` | Web App at POST /v1/creator/uploads/:imageId/sign-affirmation (R71 §3.7 row 7) | esign.captureSignature(ISA) | `signatures` row + `images.signing_event_id_authorship` stamped | ESIGN_DOCUMENT_REQUIRED if precondition fails; IMMUTABLE_STATUS if image is `live`/`sold`/`taken_down` |
 | 8 | image-id assignment + Original encryption | Backend (inline at R71 §3.7 row 7) | storage (TBD) | DEK_image generated; Original encrypted (AES-256-GCM); written to local FS at `/var/originals/<image-id>.enc` | -- |
 | 9 | Listing preview + Thumbnail variants | Backend + Cloudinary | Variant Build Service (Commerce, TBD) | Public-circulation variants composed | -- |
 
 Steps 1-7 are Certification-owned. Steps 8-9 are Commerce (Card 2 Image Creation), but R71 §3.7 row 7 executes them inline at the sign-affirmation endpoint -- the WSD shows the inlining for traceability (OI-03).
+
+**Ordering note (per [ADR-0006](../adr/adr_0006_isa_decoupled_from_moderation.md)):** step 7 ISA may execute in parallel with steps 4-5-6. The creator can sign the affirmation immediately after upload while moderation runs; the synchronization point is the Card 3 List endpoint (`POST /v1/images/:imageId/list`) which requires BOTH `status='draft'` (moderator-approved) AND `signing_event_id_authorship` non-null (ISA signed). Order between the two is not constrained.
 
 ## 3. State Transitions
 
@@ -67,7 +69,7 @@ Steps 1-7 are Certification-owned. Steps 8-9 are Commerce (Card 2 Image Creation
 | OI-01 | Email notification after moderator approve (step 6): email subsystem not yet specified; mechanism is TBD |
 | OI-02 | If image_spec server re-check rejects an already-passed client-side check (proxy tampering, file mutation in flight), discrepancy logging for fraud detection is not in MVP scope |
 | OI-03 | Workflow scope boundary at step 8-9: R62 Card 1 ends at ESIGN; R71 §3.7 row 7 folds Card 2 ops into the same endpoint. WSD shows the inlining for traceability; whether steps 8-9 belong here or in card2_image_creation_wsd is a doc-organization call |
-| OI-04 | Step 6 timing: creator must come back to complete ESIGN. R71 surfaces "<24h" SLA for review but no explicit deadline for creator to complete sign-affirmation after approve. Stale `draft` images need a TTL policy at MMP |
+| OI-04 | Step 6 → step 7 timing: per [ADR-0006](../adr/adr_0006_isa_decoupled_from_moderation.md) creator no longer has to come back specifically for ISA -- they may sign during the upload session while moderation runs. Stale `draft` images (metadata + ISA in, moderator approved, never published) still need a TTL policy at MMP |
 
 ## 7. Cross-References
 
@@ -81,8 +83,9 @@ Steps 1-7 are Certification-owned. Steps 8-9 are Commerce (Card 2 Image Creation
 | image_spec | §1.3 ingestion-window gate (client + server) |
 | moderation | two-checkbox review |
 | esign | ISA capture |
-| Constitution INV-2 | ESIGN precedes the entity it admits (ISA precedes image-id assignment) |
+| Constitution INV-2 | ESIGN precedes the entity it admits -- per [ADR-0006](../adr/adr_0006_isa_decoupled_from_moderation.md), "the entity ISA admits" is the deed mint at Card 5, not the moderator-approved status transition |
+| **ADR-0006** | ISA decoupled from moderation -- step 7 is parallel to steps 4-5 |
 | Constitution INV-9 | client-side gate is deterministic, no network; server gate may call vetted APIs (NCMEC handoff) |
 
 ---
-*Last Updated: 05/28/26 09:00*
+*Last Updated: 05/29/26 18:00*

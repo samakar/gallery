@@ -1,6 +1,6 @@
 # Arweave Master (Registry)
 
-On-Arweave Master encryption + ArDrive Turbo upload. Decrypts the Original via `image_gen.decryptOriginal` (cross-function read into Commerce), re-encrypts with the SAME `DEK_image` (single-DEK per R65 §3.14), computes canonical-pixels sha256 for deed metadata anchoring, constructs the doubly-nested `enc_final` for deed-bound unlock per R62 §2.3, and uploads to Arweave via ArDrive Turbo. Persists `arweave_uri` + `sha256` to `images`. Called by Commerce's `run_image_ops` at step (b).
+On-Arweave Master encryption + ArDrive Turbo upload. Decrypts the Original via `image_gen.decryptOriginal` (cross-function read into Commerce), re-encrypts with the SAME `DEK_image` (single-DEK per R65 §3.14), computes canonical-pixels sha256 for deed metadata anchoring, **reads the persisted `images.phash` from the Card 1 uniqueness gate (per [ADR-0005](../adr/adr_0005_phash_in_deed_and_uniqueness_gate.md))**, constructs the doubly-nested `enc_final` for deed-bound unlock per R62 §2.3, and uploads to Arweave via ArDrive Turbo. Persists `arweave_uri` + `sha256` to `images`. Called by Commerce's `run_image_ops` at step (b).
 
 ## 1. Interface
 
@@ -19,7 +19,8 @@ On-Arweave Master encryption + ArDrive Turbo upload. Decrypts the Original via `
 |---|---|---|
 | ok | bool | true |
 | arweave_uri | string | `https://arweave.net/<tx_id>` |
-| sha256 | string | hex of canonical Master pixels (deed `variant_hashes["M+00"]`) |
+| sha256 | string | hex of canonical Master pixels (deed `variant_hashes["M+00"].sha256`) |
+| phash | string | 16-char hex 64-bit DCT pHash; **read from `images.phash`** (computed at Card 1 per ADR-0005); deed `variant_hashes["M+00"].phash` |
 | enc_final | string | base64 of `encrypt(encrypt(DEK_image, buyer_wallet_pubkey), platform_DEK)` |
 
 ### 1.3 Error Codes
@@ -33,24 +34,25 @@ On-Arweave Master encryption + ArDrive Turbo upload. Decrypts the Original via `
 
 | Type | Condition |
 |---|---|
-| Pre | `images.dek_wrapped` populated; PLATFORM_DEK set; ArDrive Turbo FIAT-credit topped up |
-| Post (build) | `images.arweave_uri` populated; `images.sha256` populated; byte-immutable for deed lifetime per R62 §7.4 |
+| Pre | `images.dek_wrapped` populated; `images.phash` populated (Card 1 uniqueness gate); PLATFORM_DEK set; ArDrive Turbo FIAT-credit topped up |
+| Post (build) | `images.arweave_uri` populated; `images.sha256` populated; `images.phash` preserved (read-through, never overwritten); byte-immutable for deed lifetime per R62 §7.4 |
 | Post (idempotent) | already-built returns existing values; no re-encrypt, no re-upload |
 
 ### 1.5 Acceptance Criteria
 
 | ID | Given | When | Then |
 |---|---|---|---|
-| AC-01 | image with encrypted Original; not yet built | `buildAndUpload(image_id, pubkey)` | `arweave_uri` set; `sha256` set; `enc_final` returned |
+| AC-01 | image with encrypted Original; not yet built | `buildAndUpload(image_id, pubkey)` | `arweave_uri` set; `sha256` set; `phash` read-through from `images.phash`; `enc_final` returned |
 | AC-02 | already built | re-call | `MASTER_ALREADY_BUILT`; no upload, no DB mutation |
 | AC-03 | ArDrive 503 | call | retried internally by SDK; if all fail, `ARWEAVE_UPLOAD_FAILED` |
 | AC-04 | INV-04 verification | post-build | Original at `/var/originals/<image-id>.enc` byte-equal to pre-build (read-only) |
 
 ## 2. Functional Requirements
 
-### 2.1 Decrypt + Hash
+### 2.1 Decrypt + Hash + phash read-through
 1. Call `image_gen.decryptOriginal(image_id)` → plaintext bytes (in-flight only).
 2. Compute `sha256(canonical_pixels)` (decoded RGB; not the compressed JPEG bytes per image_gen OI-04). This becomes `deed.variant_hashes["M+00"].sha256`.
+3. Read `images.phash` (already populated at Card 1 by [cert/image_uniqueness](../cert/image_uniqueness.md) per [ADR-0005](../adr/adr_0005_phash_in_deed_and_uniqueness_gate.md)). This becomes `deed.variant_hashes["M+00"].phash`. **No recomputation**: the upload-time phash is the deed anchor (single source of truth -- pixel-equivalent under INV-04 means the canonical-Master phash equals the upload-buffer phash; explicit read-through guarantees this without re-running sharp-phash).
 
 ### 2.2 Re-encrypt with Same DEK
 1. Read `images.dek_wrapped` → unwrap with `process.env.PLATFORM_DEK` → `DEK_image`.
@@ -103,7 +105,8 @@ Decrypted plaintext is consumed by re-encryption + sha256; never persisted to di
 | `@ardrive/turbo-sdk` (R71 §3.2) | Arweave upload (FIAT-funded) |
 | `image_gen.decryptOriginal` (Commerce) | Source plaintext (cross-function read) |
 | `node:crypto` | AES-256-GCM + asymmetric encrypt for inner layer |
-| `images` table (Prisma) | `dek_wrapped` read + `arweave_uri` / `sha256` write |
+| `images` table (Prisma) | `dek_wrapped` + `phash` read; `arweave_uri` / `sha256` write |
+| `cert/image_uniqueness` (predecessor at Card 1) | populates `images.phash` per [ADR-0005](../adr/adr_0005_phash_in_deed_and_uniqueness_gate.md) |
 | `process.env.PLATFORM_DEK` | envelope key |
 | `process.env.ARDRIVE_TURBO_TOKEN` | upload credential |
 
@@ -121,7 +124,9 @@ Decrypted plaintext is consumed by re-encryption + sha256; never persisted to di
 | Doc | Purpose |
 |---|---|
 | image_gen.md | `decryptOriginal` source + Original custody |
-| crossmint_dispatch.md | Consumes `arweave_uri` + `enc_final` + `sha256` in mint payload |
+| crossmint_dispatch.md | Consumes `arweave_uri` + `enc_final` + `sha256` + `phash` in mint payload |
+| cert/image_uniqueness.md | Card 1 producer of `images.phash` (read-through by this module) |
+| **ADR-0005** | phash in deed + uniqueness gate restored to MVP |
 | run_image_ops.md | Caller (step b of the pipeline) |
 | R71 §2.4 step 11-12 | Authoritative steps |
 | R71 §3.3 ArDrive Turbo | Vendor contract |
@@ -132,4 +137,4 @@ Decrypted plaintext is consumed by re-encryption + sha256; never persisted to di
 | Constitution INV-08 | C2PA append-only (N/A at MVP) |
 
 ---
-*Last Updated: 05/29/26 17:00*
+*Last Updated: 05/29/26 17:30*
