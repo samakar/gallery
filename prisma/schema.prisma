@@ -29,6 +29,17 @@ model User {
   oauth_provider String // "google" | "apple"
   wallet_address String?  @unique // null until post-ESIGN wallet provisioning
   status         String   @default("active") // "active" | "suspended" (moderation Tier 0); not yet in R71 §3.6
+  // YouTube OAuth verification (identity.md §2.8). Populated by
+  // /v1/creator/youtube/verify; null until that endpoint succeeds. These four
+  // fields are an audit snapshot frozen at onboarding -- never refreshed (OI-07).
+  // creators.youtube_channel_handle is copied from here at sign-cma.
+  youtube_channel_id                     String?   @unique // UC-prefix stable channel id
+  youtube_channel_handle                 String?   // @-prefix handle (snippet.customUrl)
+  youtube_subscriber_count_at_onboarding Int?      // statistics.subscriberCount at verify time
+  youtube_verified_at                    DateTime? // server clock at verify pass
+  // Email delivery state per /docs/cert/email.md §2.8. Flipped to 'suppressed'
+  // when Postmark reports a hard bounce / spam complaint via the webhook.
+  email_status                           String    @default("active") // 'active' | 'suppressed' | 'unsubscribed'
   created_at     DateTime @default(now())
   updated_at     DateTime @updatedAt
 
@@ -36,15 +47,19 @@ model User {
   owner         Owner?
   signatures    Signature[]
   reviewed_by_me ImageReview[]
+  reports       ImageReport[]
 
   @@index([email])
   @@map("users")
 }
 
-// Founder-curated gate for creator onboarding (R71 §3.6). Email is the join
-// key against `users.email` at sign-cma.
+// Allowlist gate for creator onboarding (R71 §3.6 + identity.md §2.4).
+// Two population paths: auto-insert on YouTube OAuth pass (`note = 'youtube_oauth'`)
+// and manual founder-curated exception (`note = 'manual:<reason>'`). Email is
+// the join key against `users.email` at sign-cma.
 model CreatorAllowlist {
   email      String   @id
+  note       String   @default("manual") // 'youtube_oauth' | 'manual' | 'manual:<reason>'
   created_at DateTime @default(now())
 
   @@map("creator_allowlist")
@@ -124,6 +139,7 @@ model Image {
   purchases  Purchase[]
   deed       Deed?
   signatures Signature[]
+  reports    ImageReport[]
 
   @@index([creator_id, status])
   @@index([status, published_at(sort: Desc)])
@@ -154,6 +170,33 @@ model ImageReview {
   @@map("image_reviews")
 }
 
+// One row per third-party abuse / safety / rights report submitted via the
+// image-page Report footer. Distinct from ImageReview (which is the
+// platform-internal moderation decision). Anonymous reports allowed --
+// reporter_user_id and reporter_email both nullable. recaptcha_score is the
+// reCAPTCHA Enterprise verdict (0.0..1.0) captured at submission for audit;
+// status drives the moderation queue.
+model ImageReport {
+  id                String   @id @default(uuid())
+  image_id          String
+  reporter_user_id  String?  // null = anonymous
+  reporter_email    String?  // optional even for anonymous
+  reason            String   // 'rights' | 'safety' | 'fraud' | 'quality' | 'other'
+  description       String?
+  ip_address        String?
+  recaptcha_score   Float?   // 0.0 (almost certainly bot) to 1.0 (almost certainly human)
+  recaptcha_action  String?  // expected 'submit_report' -- mismatch suggests token replay
+  status            String   @default("open") // 'open' | 'reviewed' | 'dismissed' | 'actioned'
+  created_at        DateTime @default(now())
+
+  image    Image @relation(fields: [image_id], references: [image_id])
+  reporter User? @relation(fields: [reporter_user_id], references: [user_id])
+
+  @@index([image_id, created_at(sort: Desc)])
+  @@index([status, created_at(sort: Desc)])
+  @@map("image_reports")
+}
+
 // -------------------------------------------------------------------
 // ESIGN ledger (append-only at the application layer)
 // -------------------------------------------------------------------
@@ -171,6 +214,11 @@ model Signature {
   clicked_at             DateTime @default(now())
   ip_address             String
   session_token_hash     String
+  // Postmark MessageID of the onboarding email that delivered this signature's
+  // PDF copy to the signer. Populated by sendOnboardingCreatorEmail /
+  // sendOnboardingBuyerEmail post-send. Audit anchor per /docs/cert/email.md
+  // §1.4 -- proves the buyer-retained copy was dispatched.
+  email_message_id       String?
 
   user                  User       @relation(fields: [user_id], references: [user_id])
   image                 Image?     @relation(fields: [image_id], references: [image_id])
@@ -227,7 +275,7 @@ model Purchase {
 // ownership-gating lookups without per-request RPC.
 model Deed {
   image_id             String   @id
-  mint_address         String   @unique // Solana base58 NFT address
+  asset_id             String   @unique // Solana cNFT asset_id (Metaplex DAS); was mint_address pre-Bubblegum
   owner_wallet_address String
   owner_id             String
   deed_state           String   @default("sealed")

@@ -70,10 +70,11 @@ export interface DispatchInput {
     description: string;
     creator_display_name: string;
     preview_url: string;          // Cloudinary listing preview (or Arweave URI when wired)
-    arweave_uri: string | null;   // null at MVP -- arweave_master not yet wired; spec calls for this
-    sha256: string | null;        // canonical-pixels sha256; null at MVP
-    phash: string | null;         // perceptual hash; null at MVP
-    license_signing_event_id: string | null; // null at MVP -- ESIGN click-wrap not yet wired
+    arweave_uri: string | null;   // Arweave URI of encrypted Master per R62 §2.3
+    sha256: string | null;        // canonical-pixels sha256
+    phash: string | null;         // perceptual hash from Card 1 uniqueness gate
+    enc_final: string | null;     // base64 enc_final per R62 §2.3; null until buyer wallet is real
+    license_signing_event_id: string | null; // per-image License Acceptance signature id
     royalty_pct: number;
     creator_wallet: string | null;
 }
@@ -142,6 +143,7 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
                 // placeholder, and so the swap to real values is a no-op once
                 // those subsystems land.
                 arweave_master_uri: input.arweave_uri,
+                enc_final: input.enc_final,
                 deed_state: 'sealed',
                 royalty_pct: input.royalty_pct,
                 royalty_recipients: input.creator_wallet

@@ -1,0 +1,24 @@
+{
+  "env": "staging",
+  "recipient": "email:samakar@gmail.com:solana",
+  "questions": {
+    "Q1_standard_getAccountInfo": {
+      "ok": true,
+      "found": false,
+      "note": "Account not found on this RPC. If Crossmint minted a compressed NFT (cNFT), there is no asset account -> use --das-rpc (DAS getAsset) to confirm."
+    },
+    "Q2_post_mint_update": {
+      "http": 400,
+      "ok": false
+    }
+  },
+  "collection_id": "00f33d43-884c-4528-ba31-b4ee0ef83cce",
+  "mint_address_used": "Egy7TSPHDF9rHXLzRN3ZYuEY3c947WZe8YP2PytbVTGm",
+  "onChain": {
+    "status": "success",
+    "mintHash": "Egy7TSPHDF9rHXLzRN3ZYuEY3c947WZe8YP2PytbVTGm",
+    "txId": "5jEcpfQXApKDip5DohzJZjtL7Vvwd6CKFjUZeK2BZZauhPxFU3fhG2kpUjXSeubezwojT7BeHGyrNd1xuLdumnQS",
+    "owner": "F5P3ZyrzPYgoAV2uhTiCvCkpeGFAWmqfuBQ9XuzLpGNk",
+    "chain": "solana"
+  }
+}

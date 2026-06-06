@@ -1,4 +1,6 @@
-# Crossmint Webhook (Registry)
+# Crossmint Webhook (Registry) -- SUPERSEDED
+
+> **Status: SUPERSEDED.** When the self-mint dispatcher (/docs/registry/cnft_dispatch.md) ships, the async webhook pattern is replaced by direct in-process awaiting of the Solana `confirmed` commitment after `mint_v1` submission. The `deeds` row insert + `images.status='sold'` flip + `purchases.status='confirmed'` transitions happen synchronously at the end of the Path 4 mint sequence in /docs/registry/mint_architecture.md §4. No webhook surface exists in the self-mint architecture. This doc remains in tree for historical context; see /docs/divergences.md D-14.
 
 Receives `mint.succeeded` / `mint.failed` callbacks from Crossmint. On success: inserts `deeds` row, calls `metadata.onMintSucceeded` (Commerce) to flip `images.status='sold'` + visibility, and transitions `purchases.status='confirmed'`. On failure: calls `payments.refundPurchase`. HMAC signature verification analogous to Stripe.
 

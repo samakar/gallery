@@ -50,10 +50,18 @@ export type BundleResult =
     | { ok: true; mja: SignatureRow; license: SignatureRow }
     | { ok: false; error_code: EsignErrorCode; message: string };
 
-// Single-document capture (R71 §3.7 rows 4, 7, 16).
-export async function captureSignature(input: SignatureInput): Promise<CaptureResult> {
+// Single-document capture (R71 §3.7 rows 4, 7, 16). Optional `client` lets
+// a caller pass a Prisma transaction client (`prisma.$transaction(async tx
+// => ...)`) so the signature write participates in the caller's transaction
+// instead of competing for the DB connection on its own. Defaults to the
+// global client for standalone captures.
+type SignatureClient = { signature: { create: (args: any) => Promise<any> } };
+export async function captureSignature(
+    input: SignatureInput,
+    client: SignatureClient = prisma,
+): Promise<CaptureResult> {
     const hash = sha256Hex(input.document_text);
-    const row = await prisma.signature.create({ data: toSignatureData(input, hash) });
+    const row = await client.signature.create({ data: toSignatureData(input, hash) });
     // INV-2: wallet provisioning fires post-CMA/MJA via identity.provisionWalletIfMissing
     // (TODO: wire when Magic admin SDK is in; identity.ts is still TODO on that surface).
     return { ok: true, row: { signing_event_id: row.id, document_version_hash: hash } };

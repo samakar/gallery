@@ -206,7 +206,7 @@ On `payment_intent.succeeded`, the webhook handler returns 200 to Stripe after a
 | OI-05 | Buyer-initiated refund (cancel within 30 days) -- R71 doesn't expose this surface at MVP; refundPurchase is system-triggered only |
 | OI-06 | Webhook signing-secret rotation -- two-secret rolling window is the Stripe-recommended pattern; not implemented at MVP |
 | OI-07 | High-volume webhook handling -- single conditional UPDATE per event is sufficient at MVP volume (~3 sales / day per R71 §3.9). At MMP scale, queue-based ingestion may be needed |
-| OI-08 | Stale `paid` purchases per ADR-0001 -- if buyer closes tab before `start-build` POST, `purchases.status` sits at `paid` forever. Recovery: grace-period sweeper (auto-default monogram to billing initials + spawn build) or auto-refund after N hours. Owner TBD |
+| OI-08 | **Resolved by ADR-0007 (2026-06-02).** Stale `paid` purchases split two ways: (a) `monogram_text` set + dispatch failed transiently -> stale-paid sweeper at `src/app/workers/stale_paid_sweeper.ts` retries `start-build` every 60s indefinitely using the persisted monogram, no buyer involvement; (b) `monogram_text` null (buyer never clicked Mark my image) -> system waits indefinitely, no auto-default, no auto-refund; recovery happens on next signed-in visit via `pending_purchase_id` in the image GET response, which auto-opens the BuyWizard at the monogram step. See /docs/divergences.md D-03, D-04, D-05 for the rationale; auto-default-from-billing-initials and auto-refund-after-N-hours both rejected in favor of buyer agency |
 
 ## 7. Cross-References
 

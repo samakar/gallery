@@ -9,6 +9,7 @@
 
 import { createHmac, timingSafeEqual } from 'node:crypto';
 import { prisma } from '../db';
+import { refundPurchase } from '../commerce/payments';
 
 export type WebhookErrorCode = 'CROSSMINT_SIGNATURE_INVALID';
 
@@ -139,9 +140,13 @@ export async function applyMintFailed(purchaseId: string, reason: string): Promi
             failure_reason: `MINT_FAILED:${reason}`,
         },
     });
-    // TODO: payments.refundPurchase(purchaseId) -- per crossmint_webhook spec
-    // §2.3, mint.failed should trigger a Stripe refund. Wire when payments
-    // refundPurchase is implemented.
+    // Per crossmint_webhook spec §2.3: mint.failed triggers a Stripe refund.
+    // refundPurchase is idempotent via Stripe's idempotencyKey, so repeated
+    // calls on duplicate webhooks are safe.
+    const refundResult = await refundPurchase(purchaseId, 'requested_by_customer');
+    if (!refundResult.ok) {
+        console.error('[crossmint.webhook] refund failed for purchase', purchaseId, refundResult);
+    }
 }
 
 // POST /v1/webhooks/crossmint (R71 §3.7 row 22).

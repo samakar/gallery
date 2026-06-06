@@ -96,7 +96,7 @@ Decision -- "drm" is under Certification: the ingestion gates live at `cert/drm/
 | OI-04 | RESOLVED by INV-2 (ESIGN is Certification; the durable-but-centralized records are Gateway / Certification by invariant) |
 | OI-05 | RESOLVED -- R62 §1.1 adopts "Commerce"; naming now consistent across both docs |
 | OI-06 | Forensic attribution (watermark extract) is Certification trust-maintenance per R62 §2.1 (exit-side mirror of the entry gates); embedding is Commerce per INV-5. Deferred at MVP (spectrographic), revisit at MMP |
-| OI-07 | constitution.md still unwritten; invariants live as highlights in CLAUDE.md |
+| OI-07 | RESOLVED -- invariants live in the CLAUDE.md Invariants section as the operative source; no separate constitution.md by design |
 
 ## 6. Cross-References
 

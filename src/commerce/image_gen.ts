@@ -93,8 +93,18 @@ export async function uploadFromUrl(image_id: string, remote_url: string): Promi
 // font from Google Fonts at delivery time, no upload to Cloudinary needed.
 //   - EB Garamond@google (gallery register; italic via font_style)
 //   - IBM Plex Mono@google (URL-text register; slashed zero + distinct 1/l)
+// Post-process the SDK URL to render a literal "/" in the text overlay.
+// Per Cloudinary docs (https://cloudinary.com/documentation/video_layers#special_characters),
+// "/" must be written as "%252F" -- double-encoded -- because the URL parser
+// decodes once at URL level (%252F -> %2F) and the text renderer decodes
+// again (%2F -> /). Writing plain "%2F" makes the URL parser treat it as a
+// path separator and breaks the transformation.
+function withSlashFix(url: string): string {
+    return url.replace(/EPGSLASH/g, '%252F');
+}
+
 export function buildListingPreviewUrl(image_id: string): string {
-    return cloudinary.url(image_id, {
+    return withSlashFix(cloudinary.url(image_id, {
         secure: true,
         transformation: [
             { fetch_format: 'auto', quality: 'auto', width: 1080, crop: 'limit' },
@@ -147,12 +157,17 @@ export function buildListingPreviewUrl(image_id: string): string {
                     font_family: 'IBM Plex Mono@google',
                     font_size: 36,
                     font_weight: 500,
-                    // "/" double-encodes in Cloudinary text overlays.
-                    // Pure-ASCII dash avoids it.
-                    text: `epima.ge-${image_id}`,
-                    // `stroke: 'stroke'` makes border style the glyph outline
-                    // instead of a rectangular box around the bounding box.
+                    // URL-text register reads "epima.ge/<image_id>" per R62
+                    // §4.3. We swap a literal "/" via a sentinel placeholder
+                    // ("EPGSLASH") in the SDK-generated URL after url() runs,
+                    // because the SDK's text encoder double-encodes "/" to
+                    // "%252F" and Cloudinary then renders the literal text
+                    // "%2F". See post-process below.
+                    text: `epima.geEPGSLASH${image_id}`,
                     stroke: 'stroke',
+                    // 10% wider tracking than IBM Plex Mono's natural mono
+                    // advance. Cloudinary's letter_spacing is additive in px.
+                    letter_spacing: 2,
                 },
                 color: 'white',
                 border: '2px_solid_black',
@@ -194,7 +209,7 @@ export function buildListingPreviewUrl(image_id: string): string {
                 y: 12,
             },
         ],
-    });
+    }));
 }
 
 // Share Copy URL -- post-purchase variant per R62 §2.2 / §4.3. Differences
@@ -204,18 +219,22 @@ export function buildListingPreviewUrl(image_id: string): string {
 //   - Same URL text + format/quality otherwise
 export function buildShareCopyUrl(image_id: string, monogram: string): string {
     const mark = monogram?.trim() ? `1 of 1  ${monogram.trim().toUpperCase()}` : '1 of 1';
-    return cloudinary.url(image_id, {
+    return withSlashFix(cloudinary.url(image_id, {
         secure: true,
         transformation: [
             { fetch_format: 'auto', quality: 'auto', width: 1080, crop: 'limit' },
-            // URL text on the lower-right vertical edge -- unchanged from Listing Copy.
+            // URL text -- same EPGSLASH sentinel + post-process trick as
+            // buildListingPreviewUrl so the rendered glyph is "/", not "-".
             {
                 overlay: {
                     font_family: 'IBM Plex Mono@google',
                     font_size: 36,
                     font_weight: 500,
-                    text: `epima.ge-${image_id}`,
+                    text: `epima.geEPGSLASH${image_id}`,
                     stroke: 'stroke',
+                    // 10% wider tracking than IBM Plex Mono's natural mono
+                    // advance. Cloudinary's letter_spacing is additive in px.
+                    letter_spacing: 2,
                 },
                 color: 'white',
                 border: '2px_solid_black',
@@ -241,7 +260,58 @@ export function buildShareCopyUrl(image_id: string, monogram: string): string {
                 y: 12,
             },
         ],
-    });
+    }));
+}
+
+// Download URL -- Share Copy variant forced to JPEG with an attachment flag
+// so the browser saves with `.jpg` extension instead of Chrome's quirky
+// `.jfif`. Universally accepted by social networks. Drops the f_auto modern-
+// format optimization in exchange for the consistent file type.
+export function buildDownloadUrl(image_id: string, monogram: string): string {
+    const mark = monogram?.trim() ? `1 of 1  ${monogram.trim().toUpperCase()}` : '1 of 1';
+    const filename = `epimage-${image_id}`;
+    return withSlashFix(cloudinary.url(image_id, {
+        secure: true,
+        // Force JPEG + Content-Disposition: attachment with our chosen filename.
+        format: 'jpg',
+        flags: `attachment:${filename}`,
+        transformation: [
+            { quality: 'auto', width: 1080, crop: 'limit' },
+            // Same URL text overlay as Share Copy.
+            {
+                overlay: {
+                    font_family: 'IBM Plex Mono@google',
+                    font_size: 36,
+                    font_weight: 500,
+                    text: `epima.geEPGSLASH${image_id}`,
+                    stroke: 'stroke',
+                    letter_spacing: 2,
+                },
+                color: 'white',
+                border: '2px_solid_black',
+                opacity: 90,
+                gravity: 'south_east',
+                angle: -90,
+                x: 28,
+                y: 28,
+            },
+            // Edition mark + buyer monogram, same as Share Copy.
+            {
+                overlay: {
+                    font_family: 'EB Garamond@google',
+                    font_size: 36,
+                    font_style: 'italic',
+                    text: mark,
+                },
+                color: 'white',
+                effect: 'shadow:50',
+                opacity: 80,
+                gravity: 'south_west',
+                x: 12,
+                y: 12,
+            },
+        ],
+    }));
 }
 
 // Permanently remove a Cloudinary asset by public_id. Used when a creator

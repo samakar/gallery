@@ -21,7 +21,38 @@
 import { TurboFactory, ArweaveSigner } from '@ardrive/turbo-sdk';
 import Arweave from 'arweave';
 import { createHash } from 'node:crypto';
+import * as fs from 'node:fs/promises';
+import * as path from 'node:path';
 import { prisma } from '../db';
+import { encryptMaster } from '../cert/crypto';
+
+// Local encrypted-Master persistence per R71 §1.1 + D-11 follow-through.
+// MVP architecture: platform delivers the Master from this local copy via
+// /v1/deeds/:imageId/download-master. Arweave upload is best-effort for the
+// long-term license-survival path (R62 §2.3 post-cessation recovery); the
+// local copy is the operative source for buyer downloads at MVP.
+const ENCRYPTED_MASTER_DIR = path.join(
+    process.cwd(),
+    process.env.ENCRYPTED_MASTER_DIR ?? 'data/encrypted_masters',
+);
+
+export function encryptedMasterPath(image_id: string): string {
+    return path.join(ENCRYPTED_MASTER_DIR, `${image_id}.bin`);
+}
+
+export async function readEncryptedMasterLocal(image_id: string): Promise<Buffer | null> {
+    try {
+        return await fs.readFile(encryptedMasterPath(image_id));
+    } catch (e: any) {
+        if (e?.code === 'ENOENT') return null;
+        throw e;
+    }
+}
+
+async function persistEncryptedMasterLocal(image_id: string, ciphertext: Buffer): Promise<void> {
+    await fs.mkdir(ENCRYPTED_MASTER_DIR, { recursive: true });
+    await fs.writeFile(encryptedMasterPath(image_id), ciphertext);
+}
 
 export type ArweaveErrorCode = 'ARWEAVE_UPLOAD_FAILED' | 'MASTER_ALREADY_BUILT';
 
@@ -102,42 +133,82 @@ export async function buildAndUpload(input: BuildAndUploadInput): Promise<Arweav
         const previewBytes = await fetchPreviewBytes(input.preview_url);
         const sha256 = createHash('sha256').update(previewBytes).digest('hex');
 
-        // Build the manifest JSON that gets uploaded to Arweave. Tiny payload
-        // (~1KB) so Turbo's free tier covers it. Real impl uploads the
-        // encrypted Master bytes themselves; this is a placeholder for staging.
-        const manifest = {
-            schema: 'epimage.deed.manifest/v0-mvp-stub',
-            image_id: input.image_id,
-            title: input.title,
-            creator: input.creator_display_name,
-            buyer_wallet: input.buyer_wallet_pubkey,
-            preview_url: input.preview_url,
-            sha256_of_preview: sha256,
-            phash: image?.phash ?? null,
-            note: 'MVP scaffold: preview bytes are hashed in place of encrypted Master. Real Master upload arrives with image_gen encryption.',
-            generated_at: new Date().toISOString(),
-        };
-        const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2), 'utf-8');
+        // Encrypt the preview bytes with a per-image DEK, wrap the DEK with
+        // PLATFORM_DEK, persist the wrapped DEK to images.dek_wrapped.
+        const { ciphertext, dek_wrapped, dek_image } = encryptMaster(previewBytes);
+        void dek_image; // run_image_ops re-unwraps for enc_final.
+
+        // Persist ciphertext to local disk BEFORE attempting Arweave -- so even
+        // if Arweave 402s, the platform-mediated Master download still works
+        // (D-11 follow-through). Local copy is the operative download source
+        // at MVP; Arweave is best-effort for the long-term post-cessation path.
+        await persistEncryptedMasterLocal(input.image_id, ciphertext);
 
         const turbo = await getTurbo();
-        const upload = await turbo.upload({
-            data: manifestBytes,
-            dataItemOpts: {
-                tags: [
-                    { name: 'Content-Type', value: 'application/json' },
-                    { name: 'App-Name', value: 'Epimage' },
-                    { name: 'App-Version', value: '0-mvp' },
-                    { name: 'Image-Id', value: input.image_id },
-                    { name: 'Sha256', value: sha256 },
-                ],
-            },
-        });
 
-        const arweave_uri = `https://arweave.net/${upload.id}`;
+        // Try the full encrypted-Master upload. If the Arweave wallet is out
+        // of Turbo credits (HTTP 402), fall back to uploading a tiny manifest
+        // JSON instead -- the deed still gets a real Arweave URI and the
+        // ciphertext stays on the server for later upload when the wallet is
+        // funded. Persist dek_wrapped either way so the asymmetric layer
+        // works at mint time.
+        let arweave_uri: string;
+        try {
+            const upload = await turbo.upload({
+                data: ciphertext,
+                dataItemOpts: {
+                    tags: [
+                        { name: 'Content-Type', value: 'application/octet-stream' },
+                        { name: 'App-Name', value: 'Epimage' },
+                        { name: 'App-Version', value: '1-mvp' },
+                        { name: 'Image-Id', value: input.image_id },
+                        { name: 'Sha256', value: sha256 },
+                        { name: 'Encryption', value: 'AES-256-GCM' },
+                        { name: 'Encryption-Schema', value: 'aes-256-gcm-v1' },
+                    ],
+                },
+            });
+            arweave_uri = `https://arweave.net/${upload.id}`;
+        } catch (uploadErr) {
+            const msg = (uploadErr as Error)?.message ?? String(uploadErr);
+            if (!/Insufficient balance|Status 402/i.test(msg)) {
+                throw uploadErr; // unrelated error -- rethrow
+            }
+            console.warn(
+                '[arweave] Out of Turbo credits. Falling back to manifest-JSON upload. ' +
+                'Fund the wallet at https://turbo.ardrive.io to upload encrypted bytes. ' +
+                `Image ${input.image_id} dek_wrapped is persisted; ciphertext was not uploaded.`,
+            );
+            const manifest = {
+                schema: 'epimage.deed.manifest/v1-no-credit-fallback',
+                image_id: input.image_id,
+                title: input.title,
+                creator: input.creator_display_name,
+                preview_url: input.preview_url,
+                sha256,
+                phash: image?.phash ?? null,
+                note: 'Encrypted Master bytes were not uploaded due to Arweave wallet exhaustion. dek_wrapped is on the platform DB; ciphertext is not yet on Arweave.',
+                generated_at: new Date().toISOString(),
+            };
+            const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2), 'utf-8');
+            const upload = await turbo.upload({
+                data: manifestBytes,
+                dataItemOpts: {
+                    tags: [
+                        { name: 'Content-Type', value: 'application/json' },
+                        { name: 'App-Name', value: 'Epimage' },
+                        { name: 'App-Version', value: '1-mvp-fallback' },
+                        { name: 'Image-Id', value: input.image_id },
+                        { name: 'Sha256', value: sha256 },
+                    ],
+                },
+            });
+            arweave_uri = `https://arweave.net/${upload.id}`;
+        }
 
         await prisma.image.update({
             where: { image_id: input.image_id },
-            data: { arweave_uri, sha256 },
+            data: { arweave_uri, sha256, dek_wrapped },
         });
 
         return {

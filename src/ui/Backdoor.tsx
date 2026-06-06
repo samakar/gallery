@@ -39,10 +39,11 @@ export default function Backdoor() {
     else navigate('/admin/reviews');
   }
 
-  async function signInWithMagic(provider: MagicProvider) {
+  async function signInWithMagic(provider: MagicProvider, returnToOverride?: string) {
     setOauthError(null);
     setOauthPending(provider);
-    if (returnTo) sessionStorage.setItem(RETURN_KEY, returnTo);
+    const target = returnToOverride ?? returnTo;
+    if (target) sessionStorage.setItem(RETURN_KEY, target);
     else sessionStorage.removeItem(RETURN_KEY);
     try {
       await magic.oauth2.loginWithRedirect({
@@ -179,6 +180,46 @@ export default function Backdoor() {
               className="link link-hover text-xs text-base-content/50 bg-transparent border-0 p-0"
             >
               {undoing ? 'Creating…' : 'Create test listing (Picsum) →'}
+            </button>
+            <button
+              type="button"
+              disabled={oauthPending !== null}
+              onClick={() => signInWithMagic('google', '/creator/youtube/connect')}
+              className="link link-hover text-xs text-base-content/50 bg-transparent border-0 p-0"
+            >
+              {oauthPending === 'google' ? 'Redirecting…' : 'Test creator YouTube verify (Magic sign-in) →'}
+            </button>
+            <button
+              type="button"
+              disabled={undoing}
+              onClick={async () => {
+                setUndoing(true);
+                setUndoError(null);
+                try {
+                  const r = await fetch('/v1/dev/send-test-email', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({}),
+                  });
+                  const body = await r.json().catch(() => ({}));
+                  if (!r.ok) {
+                    setUndoError(
+                      body?.postmark_error?.Message
+                        ? `Postmark: ${body.postmark_error.Message}`
+                        : body?.message ?? `Test email failed (${r.status}).`
+                    );
+                  } else {
+                    setUndoError(`Sent ✓  Message ${String(body.message_id ?? '').slice(0, 8)}…`);
+                  }
+                } catch (e: any) {
+                  setUndoError(e?.message ?? 'Network error.');
+                } finally {
+                  setUndoing(false);
+                }
+              }}
+              className="link link-hover text-xs text-base-content/50 bg-transparent border-0 p-0"
+            >
+              {undoing ? 'Sending…' : 'Send test email (Postmark + CMA PDF) →'}
             </button>
             {undoError && (
               <p className="text-xs text-error">{undoError}</p>

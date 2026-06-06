@@ -117,6 +117,13 @@ export interface InitCheckoutInput {
     owner_id: string;
     owner_email: string;
     return_origin: string;  // e.g. http://localhost:5173 -- used to build return_url
+    // ESIGN gate per R71 §2.4 step 3 / payments.md §1.4 Pre. Both signature
+    // ids must reference Signature rows owned by `owner_id` with the matching
+    // document_type. mja_signature_id may be null when this is the buyer's
+    // returning purchase -- we still verify they have an MJA somewhere in
+    // history before proceeding.
+    mja_signature_id: string | null;
+    license_signature_id: string;
 }
 
 export interface InitCheckoutResult {
@@ -132,6 +139,30 @@ export async function initCheckout(input: InitCheckoutInput): Promise<InitChecko
     if (!image) throw new Error(`Image ${input.image_id} not found`);
     if (image.status !== 'live') {
         throw new Error(`Image ${input.image_id} is not live (status=${image.status})`);
+    }
+
+    // ESIGN gate (payments.md §1.4 Pre): verify both signatures exist, are
+    // owned by the buyer, and are the correct document_type.
+    const licenseSig = await prisma.signature.findUnique({
+        where: { id: input.license_signature_id },
+    });
+    if (!licenseSig || licenseSig.user_id !== input.owner_id || licenseSig.document_type !== 'LICENSE_ACCEPTANCE') {
+        throw new Error('LICENSE_REQUIRED');
+    }
+    if (input.mja_signature_id) {
+        const mjaSig = await prisma.signature.findUnique({
+            where: { id: input.mja_signature_id },
+        });
+        if (!mjaSig || mjaSig.user_id !== input.owner_id || mjaSig.document_type !== 'MJA') {
+            throw new Error('MJA_REQUIRED');
+        }
+    } else {
+        // Returning buyer -- verify they have an MJA on record somewhere.
+        const existingMja = await prisma.signature.findFirst({
+            where: { user_id: input.owner_id, document_type: 'MJA' },
+            select: { id: true },
+        });
+        if (!existingMja) throw new Error('MJA_REQUIRED');
     }
     // Ensure Owner row + Stripe customer. Owner row is created at MJA capture
     // per schema; auto-create here for MVP since the MJA click-wrap isn't
@@ -161,6 +192,8 @@ export async function initCheckout(input: InitCheckoutInput): Promise<InitChecko
             owner_id: input.owner_id,
             seller_user_id: image.creator_id,
             status: 'started',
+            signing_event_id_mja: input.mja_signature_id,
+            signing_event_id_license: input.license_signature_id,
         },
     });
 
@@ -181,11 +214,12 @@ export async function initCheckout(input: InitCheckoutInput): Promise<InitChecko
         // customer updates automatically -- automatic_tax,
         // billing_address_collection, and customer_update are all rejected
         // when managed_payments.enabled is true. Stripe handles them itself.
-        // Distinct from `?checkout=open` (which opens the modal); `?paid=<session>`
-        // signals payment succeeded so the listing can render the Confirmation
-        // state per R71 §2.4 step 16. `purchase` is the internal id used to
-        // trigger the start-build endpoint (ADR-0001 buyer-triggered build).
-        return_url: `${input.return_origin}/${image.image_id}?paid={CHECKOUT_SESSION_ID}&purchase=${purchase.id}`,
+        // BuyWizard advances via Stripe's onComplete client callback, so we
+        // don't want a return_url redirect on success. `redirect_on_completion:
+        // 'never'` keeps the iframe mounted (the wizard then transitions to
+        // the monogram step). Stripe rejects the session if return_url is
+        // also passed with this combo -- must be one or the other.
+        redirect_on_completion: 'never',
         metadata: { purchase_id: purchase.id, image_id: image.image_id },
     } as unknown as Stripe.Checkout.SessionCreateParams);
 
@@ -203,6 +237,51 @@ export async function initCheckout(input: InitCheckoutInput): Promise<InitChecko
         client_secret: session.client_secret,
         checkout_session_id: session.id,
     };
+}
+
+// -------------------------------------------------------------------
+// Refund  (payments.md §2.5)
+// -------------------------------------------------------------------
+
+// Refund a purchase. Triggered by runImageOps terminal failure, Crossmint
+// mint.failed, or an admin action via POST /v1/admin/refunds/:purchase_id.
+// Idempotent: re-calling for the same purchase returns the existing Stripe
+// refund via the idempotency key. The actual status flip to 'refunded'
+// happens when the charge.refunded webhook lands (see handleStripeWebhook).
+export async function refundPurchase(
+    purchase_id: string,
+    reason: Stripe.RefundCreateParams.Reason = 'requested_by_customer',
+): Promise<{
+    ok: boolean;
+    stripe_refund_id?: string;
+    error_code?: 'PURCHASE_NOT_FOUND' | 'NO_PAYMENT_INTENT' | 'REFUND_FAILED';
+    message?: string;
+}> {
+    const stripe = getStripe();
+    const purchase = await prisma.purchase.findUnique({ where: { id: purchase_id } });
+    if (!purchase) return { ok: false, error_code: 'PURCHASE_NOT_FOUND' };
+    if (!purchase.stripe_payment_intent_id) {
+        return { ok: false, error_code: 'NO_PAYMENT_INTENT' };
+    }
+    try {
+        const refund = await stripe.refunds.create(
+            { payment_intent: purchase.stripe_payment_intent_id, reason },
+            { idempotencyKey: purchase.id },
+        );
+        await prisma.purchase.update({
+            where: { id: purchase.id },
+            data: {
+                failure_reason: purchase.failure_reason
+                    ? `${purchase.failure_reason} | REFUND_INITIATED:${refund.id}`
+                    : `REFUND_INITIATED:${refund.id}`,
+            },
+        });
+        return { ok: true, stripe_refund_id: refund.id };
+    } catch (e) {
+        const msg = (e as Error)?.message ?? String(e);
+        console.error('[payments.refund] failed', purchase_id, msg);
+        return { ok: false, error_code: 'REFUND_FAILED', message: msg };
+    }
 }
 
 // -------------------------------------------------------------------

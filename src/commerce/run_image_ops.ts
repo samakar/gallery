@@ -3,22 +3,34 @@
 // POST /v1/purchases/:id/start-build (NOT by the Stripe webhook, per ADR-0001).
 // Spec: /docs/commerce/run_image_ops.md
 //
-// MVP scope:
-//   - Skip Arweave master upload (TODO -- arweave_master subsystem not wired).
-//     We dispatch the mint with arweave_uri=null + sha256/phash=null; the
-//     Crossmint metadata schema still carries those slots so the swap is a
-//     no-op when arweave_master ships.
-//   - Skip Share Copy build with buyer monogram (TODO -- image_gen.generateShareCopy
+// MVP scope (post ADR-0008 cNFT migration):
+//   - Upload encrypted Master to Arweave via /src/registry/arweave_master.
+//   - Build Share Copy with buyer monogram (TODO -- image_gen.generateShareCopy
 //     not wired). Use the existing Cloudinary listing preview URL as the NFT image.
-//   - Dispatch to real Crossmint staging via /src/registry/crossmint_dispatch.
-//   - Terminal mint_address arrives via the Crossmint webhook OR via polling
-//     fallback in the status endpoint.
+//   - Self-mint Bubblegum V2 cNFT under our MPL-Core Collection via
+//     /src/registry/cnft_dispatch (synchronous; no Crossmint webhook).
+//   - Persist Deed row + flip image to sold immediately on mint success via
+//     applyMintSucceeded (extracted from the legacy crossmint_webhook module
+//     and reused as-is; only the dispatch upstream changed).
 
 import { prisma } from '../db';
-import { dispatch } from '../registry/crossmint_dispatch';
+import { dispatch } from '../registry/cnft_dispatch';
+import { applyMintSucceeded } from '../registry/post_mint';
 import { buildAndUpload as buildAndUploadArweave } from '../registry/arweave_master';
 import { buildListingPreviewUrl } from './image_gen';
 import { getStripe } from './payments';
+import { unwrapDek, buildEncFinal } from '../cert/crypto';
+
+// Quick local check matching the looksLikeSolanaAddress test in
+// crossmint_dispatch -- enc_final requires a real Solana wallet for the
+// asymmetric inner layer; if the buyer doesn't have one yet (e.g. email-
+// recipient flow), we skip enc_final and Crossmint will backfill later.
+function looksLikeSolanaAddress(s: string | null): boolean {
+    if (!s) return false;
+    if (s.startsWith('0x')) return false;
+    if (s.length < 32 || s.length > 44) return false;
+    return /^[1-9A-HJ-NP-Za-km-z]+$/.test(s);
+}
 
 export interface StartBuildInput {
     purchase_id: string;
@@ -29,7 +41,8 @@ export interface StartBuildResult {
     ok: true;
     crossmint_job_id: string;
     onchain_status: string;
-    // mint_address arrives later via webhook / polling -- not in this response.
+    // asset_id is now produced synchronously by cnft_dispatch (Path 4); this
+    // shape is kept for callers that still treat the build as async.
 }
 
 export async function startBuild(input: StartBuildInput): Promise<StartBuildResult> {
@@ -123,6 +136,24 @@ export async function startBuild(input: StartBuildInput): Promise<StartBuildResu
         throw new Error(`${arweaveResult.error_code}: ${arweaveResult.message}`);
     }
 
+    // enc_final per R62 §2.3: asymmetric inner wrap to buyer wallet, outer
+    // wrap with PLATFORM_DEK. Skipped when the buyer doesn't have a valid
+    // Solana wallet yet -- Crossmint's email-recipient flow provisions one
+    // post-mint, and we can backfill on the Deed row later.
+    let enc_final: string | null = null;
+    const refreshed = await prisma.image.findUnique({
+        where: { image_id: purchase.image_id },
+        select: { dek_wrapped: true },
+    });
+    if (refreshed?.dek_wrapped && looksLikeSolanaAddress(buyerWallet)) {
+        try {
+            const dek_image = unwrapDek(Buffer.from(refreshed.dek_wrapped));
+            enc_final = buildEncFinal(dek_image, buyerWallet!);
+        } catch (e) {
+            console.warn('[run_image_ops] enc_final construction failed', (e as Error).message);
+        }
+    }
+
     const dispatchResult = await dispatch({
         image_id: purchase.image_id,
         buyer_wallet: buyerWallet,
@@ -134,7 +165,8 @@ export async function startBuild(input: StartBuildInput): Promise<StartBuildResu
         arweave_uri: arweaveResult.result.arweave_uri,
         sha256: arweaveResult.result.sha256,
         phash: arweaveResult.result.phash,
-        license_signing_event_id: null,
+        enc_final,
+        license_signing_event_id: purchase.signing_event_id_license ?? null,
         royalty_pct: 10,
         creator_wallet: null, // TODO: creator.user.wallet_address once wallets subsystem populates it
     });
@@ -148,6 +180,10 @@ export async function startBuild(input: StartBuildInput): Promise<StartBuildResu
         throw new Error(`${dispatchResult.error_code}: ${dispatchResult.message}`);
     }
 
+    // cNFT mint is synchronous (no Crossmint async webhook). Persist the tx
+    // signature, then run the same applyMintSucceeded path the webhook used --
+    // it inserts the Deed row, flips images.status to 'sold', and advances the
+    // Purchase to 'confirmed'.
     await prisma.purchase.update({
         where: { id: purchase.id },
         data: {
@@ -155,6 +191,12 @@ export async function startBuild(input: StartBuildInput): Promise<StartBuildResu
             status: 'minting',
         },
     });
+    await applyMintSucceeded(
+        purchase.id,
+        dispatchResult.asset_id,
+        dispatchResult.crossmint_job_id,
+        buyerWallet,
+    );
 
     return {
         ok: true,

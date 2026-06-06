@@ -35,10 +35,12 @@ function getStripeLoaded(): Promise<StripeJs | null> {
 
 export interface CheckoutModalProps {
     imageId: string;
+    mjaSignatureId: string | null;
+    licenseSignatureId: string;
     onClose: () => void;
 }
 
-export function CheckoutModal({ imageId, onClose }: CheckoutModalProps) {
+export function CheckoutModal({ imageId, mjaSignatureId, licenseSignatureId, onClose }: CheckoutModalProps) {
     const [clientSecret, setClientSecret] = useState<string | null>(null);
     const [error, setError] = useState<string | null>(null);
     const [loading, setLoading] = useState(true);
@@ -47,13 +49,17 @@ export function CheckoutModal({ imageId, onClose }: CheckoutModalProps) {
         let cancelled = false;
         api<{ client_secret: string; purchase_id: string }>('/v1/purchases', {
             method: 'POST',
-            body: JSON.stringify({ image_id: imageId }),
+            body: JSON.stringify({
+                image_id: imageId,
+                mja_signature_id: mjaSignatureId,
+                license_signature_id: licenseSignatureId,
+            }),
         })
             .then(d => { if (!cancelled) setClientSecret(d.client_secret); })
             .catch(e => { if (!cancelled) setError(e?.message ?? 'Failed to start checkout.'); })
             .finally(() => { if (!cancelled) setLoading(false); });
         return () => { cancelled = true; };
-    }, [imageId]);
+    }, [imageId, mjaSignatureId, licenseSignatureId]);
 
     return (
         <div

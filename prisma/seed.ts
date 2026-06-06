@@ -103,7 +103,7 @@ async function main() {
         where: { image_id: 'k7p2m' },
         create: {
             image_id: 'k7p2m',
-            mint_address: 'MintAddrK7P2M111111111111111111111111111111',
+            asset_id: 'AssetIdK7P2M11111111111111111111111111111111',
             owner_wallet_address: 'BuyerWallet111111111111111111111111111111',
             owner_id: 'dev-buyer',
             deed_state: 'sealed',

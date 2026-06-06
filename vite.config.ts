@@ -9,6 +9,10 @@ export default defineConfig({
   server: {
     proxy: {
       '/v1': 'http://localhost:3000',
+      // /i/<image_id> resolves the canonical short URL exposed in <img src>
+      // -- backend 302s to the right Cloudinary variant. Same shape in prod
+      // (epimage.com/i/<id>) so "Copy image address" produces a stable URL.
+      '/i': 'http://localhost:3000',
     },
   },
 });

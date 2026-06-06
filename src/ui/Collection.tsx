@@ -17,7 +17,7 @@ interface OwnedDeed {
     title: string;
     creator_display_name: string;
     share_copy_url: string;         // Share Copy thumbnail (R71 §2.7)
-    mint_address: string;
+    asset_id: string;               // cNFT asset_id -- shown to the buyer as "deed number"
     minted_at: string;              // ISO
     deed_state: 'sealed' | 'opened' | 'rights_disputed' | 'void' | 'burned';
 }
@@ -82,7 +82,7 @@ function DeedGrid({ deeds }: { deeds: OwnedDeed[] }) {
     return (
         <ul className="grid grid-cols-2 md:grid-cols-3 lg:grid-cols-4 gap-4">
             {deeds.map(d => (
-                <li key={d.mint_address}>
+                <li key={d.asset_id}>
                     <Link to={`/${d.image_id}`} className="block group">
                         <div className="aspect-square bg-base-200 rounded-md overflow-hidden">
                             <img

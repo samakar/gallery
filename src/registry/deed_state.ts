@@ -23,16 +23,16 @@ export type DeedStateResult =
     | { ok: false; error_code: DeedStateErrorCode; message: string };
 
 // Pure read at MVP. Solana ledger is authoritative; this row is a mirror.
-export async function getDeedState(mint_address: string): Promise<DeedStateResult> {
+export async function getDeedState(asset_id: string): Promise<DeedStateResult> {
     const deed = await prisma.deed.findUnique({
-        where: { mint_address },
+        where: { asset_id },
         select: { deed_state: true },
     });
     if (!deed) {
         return {
             ok: false,
             error_code: "DEED_NOT_FOUND",
-            message: `No deed for mint ${mint_address}.`,
+            message: `No deed for asset ${asset_id}.`,
         };
     }
     return { ok: true, deed_state: deed.deed_state as DeedState };
@@ -41,7 +41,7 @@ export async function getDeedState(mint_address: string): Promise<DeedStateResul
 // MMP only: deed_state mutations require 3-of-5 multi-sig per INV-06.
 // Not exported until activation. Reference signature:
 //   export async function transitionTo(
-//       mint_address: string,
+//       asset_id: string,
 //       new_state: DeedState,
 //       multi_sig_proof: MultiSigProof
 //   ): Promise<{ ok: boolean }>

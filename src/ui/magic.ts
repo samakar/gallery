@@ -14,8 +14,10 @@
 
 import { Magic } from 'magic-sdk';
 import { OAuthExtension } from '@magic-ext/oauth2';
+import { SolanaExtension } from '@magic-ext/solana';
 
 const publishableKey = import.meta.env.VITE_MAGIC_PUBLISHABLE_KEY as string | undefined;
+const solanaRpc = (import.meta.env.VITE_SOLANA_RPC as string | undefined) ?? 'https://api.devnet.solana.com';
 
 if (!publishableKey) {
     console.warn(
@@ -24,8 +26,14 @@ if (!publishableKey) {
     );
 }
 
+// SolanaExtension tells Magic to provision a Solana wallet on the user's first
+// sign-in (in addition to / instead of the default EVM wallet). Without this,
+// Magic returns an EVM publicAddress (0x...) which Bubblegum V2 mintV2 rejects.
 export const magic = new Magic(publishableKey ?? 'pk_live_PLACEHOLDER', {
-    extensions: [new OAuthExtension()],
+    extensions: [
+        new OAuthExtension(),
+        new SolanaExtension({ rpcUrl: solanaRpc }),
+    ],
 });
 
 export type MagicProvider = 'google' | 'apple';

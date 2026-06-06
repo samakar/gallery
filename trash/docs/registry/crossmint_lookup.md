@@ -1,4 +1,6 @@
-# Crossmint Lookup (Registry)
+# Crossmint Lookup (Registry) -- SUPERSEDED
+
+> **Status: SUPERSEDED.** When the self-mint dispatcher (/docs/registry/cnft_dispatch.md) ships, ownership lookups move to DAS-RPC (`getAsset(asset_id)` and `getAssetsByOwner(buyer_wallet)`) per /docs/registry/mint_architecture.md OI-02. This doc remains in tree for historical context; see /docs/divergences.md D-14.
 
 NFT lookup against Crossmint's NFT API to verify on-chain ownership. Used by Commerce's `renderer` for per-request ownership gating on deed-holder Share Copy downloads. No direct Solana RPC at MVP (Crossmint internalizes).
 

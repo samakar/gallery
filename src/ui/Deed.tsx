@@ -20,7 +20,7 @@ interface DeedData {
     creator_display_name: string;
     creation_date: string;          // ISO -- Firm
     edition: string;                // Firm
-    mint_address: string;           // Firm
+    asset_id: string;               // Firm -- cNFT asset_id; shown to buyer as "Deed number"
     arweave_uri: string;            // Firm
     sha256: string;                 // Firm (hex)
     minted_at: string;              // ISO -- Firm
@@ -103,7 +103,7 @@ function FirmSection({ data }: { data: DeedData }) {
         <section className="space-y-4">
             <h2 className="text-base font-light">On-chain record</h2>
             <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-3 text-sm">
-                <Firm label="Mint address" value={data.mint_address} mono truncate />
+                <Firm label="Deed number" value={data.asset_id} mono truncate />
                 <Firm label="Owner wallet" value={data.current_owner_wallet} mono truncate />
                 <Firm label="Arweave URI" value={data.arweave_uri} mono truncate />
                 <Firm label="SHA-256" value={data.sha256} mono truncate />
@@ -198,12 +198,16 @@ function Footer({ data }: { data: DeedData }) {
                 ← Back to image
             </Link>
             <a
-                href={`https://solscan.io/token/${data.mint_address}`}
+                // cNFTs are Merkle-tree leaves, not on-chain accounts.
+                // Solana Explorer's /address/ view resolves cNFT asset_ids via DAS
+                // and renders the asset properly when found.
+                // TODO: drive ?cluster from a VITE_SOLANA_NETWORK env var at mainnet deploy.
+                href={`https://explorer.solana.com/address/${data.asset_id}?cluster=devnet`}
                 target="_blank"
                 rel="noopener noreferrer"
                 className="link link-hover text-xs text-base-content/60"
             >
-                View on Solscan ↗
+                Inspect asset on chain ↗
             </a>
         </footer>
     );
@@ -220,7 +224,7 @@ function makeMockDeed(imageId: string): DeedData {
         creator_display_name: 'Sample Creator',
         creation_date: '2026-04-15',
         edition: 'Unique',
-        mint_address: 'MintAddr1111111111111111111111111111111111',
+        asset_id: 'AssetIdMock1111111111111111111111111111111',
         arweave_uri: 'https://arweave.net/abcdefghijklmnopqrstuvwxyz1234567890ABCD',
         sha256: 'a3f1c9e2b4d6f8e0a3f1c9e2b4d6f8e0a3f1c9e2b4d6f8e0a3f1c9e2b4d6f8e0',
         minted_at: '2026-05-01T14:22:00Z',

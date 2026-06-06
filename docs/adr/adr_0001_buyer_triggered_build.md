@@ -3,6 +3,8 @@
 ## Status
 Accepted -- 2026-05-29. **Partially superseded by [ADR-0002](adr_0002_monogram_as_metadata.md)**: the "drop `purchases.monogram_text`" decision is reversed -- monogram is persisted as metadata. The build-trigger decision (webhook → buyer POST) **remains accepted**. **Diverges from R71** §2.4 step 7 / §3.7 row 17 / §3.9 `runImageOps` spawn point.
 
+**Dispatch target updated (2026-06-03):** per [ADR-0008](adr_0008_self_mint_bubblegum_v2.md), `runImageOps` step (e) now targets the self-mint dispatcher at [cnft_dispatch.md](../registry/cnft_dispatch.md) (Bubblegum V2 `mint_v1` signed by HOT_MINT_KEY) rather than the Crossmint API. The buyer-triggered build trigger is unchanged; only the downstream mint mechanism shifts.
+
 ## Context
 
 R71's purchase flow (§2.4 steps 7-13 + §3.9 `runImageOps`) is async-triggered-by-webhook:

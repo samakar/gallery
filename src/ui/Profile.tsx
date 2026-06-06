@@ -8,7 +8,7 @@
 // entity_type is CMA/KYC data, not shown here per product decision.
 
 import { useEffect, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { Navigate, useNavigate } from 'react-router-dom';
 import { api } from './api';
 
 interface Profile {
@@ -23,12 +23,35 @@ export default function ProfilePage() {
     const [profile, setProfile] = useState<Profile | null>(null);
     const [loading, setLoading] = useState(true);
     const [error, setError] = useState<string | null>(null);
+    const [redirectTo, setRedirectTo] = useState<string | null>(null);
 
     const load = async () => {
         try {
             const r = await api<{ profile: Profile }>('/v1/creator/profile');
             setProfile(r.profile);
-        } catch (e) {
+        } catch (e: any) {
+            // 404 NOT_A_CREATOR means the creators row doesn't exist yet --
+            // the user is mid-onboarding. Route them to the next step
+            // (creator_onboarding_wsd.md) instead of showing a raw error.
+            const code = e?.body?.error;
+            if (code === 'NOT_A_CREATOR') {
+                try {
+                    const status = await api<{ next_step: 'youtube-verify' | 'sign-cma' | 'complete' }>(
+                        '/v1/creator/onboarding-status',
+                    );
+                    if (status.next_step === 'youtube-verify') {
+                        setRedirectTo('/creator/youtube/connect');
+                    } else if (status.next_step === 'sign-cma') {
+                        setRedirectTo('/creator/sign-cma');
+                    } else {
+                        setError('Inconsistent state: profile lookup said NOT_A_CREATOR but onboarding-status says complete. Reload to retry.');
+                    }
+                    return;
+                } catch (statusErr: any) {
+                    setError(statusErr?.body?.error ?? statusErr?.message ?? String(statusErr));
+                    return;
+                }
+            }
             setError(e instanceof Error ? e.message : String(e));
         } finally {
             setLoading(false);
@@ -37,6 +60,9 @@ export default function ProfilePage() {
 
     useEffect(() => { load(); }, []);
 
+    if (redirectTo) {
+        return <Navigate to={redirectTo} replace />;
+    }
     if (loading) {
         return (
             <main className="min-h-screen flex items-center justify-center">
@@ -61,18 +87,18 @@ function ProfileEditor({ profile, onChanged }: { profile: Profile; onChanged: ()
     const headshotRef = useRef<HTMLInputElement>(null);
 
     const [displayName, setDisplayName] = useState(profile.display_name);
-    const [legalName, setLegalName] = useState(profile.legal_name);
-    const [youtube, setYoutube] = useState(profile.youtube_channel_handle);
     const [bio, setBio] = useState(profile.creator_bio || '');
 
     const [saving, setSaving] = useState(false);
     const [uploading, setUploading] = useState(false);
     const [err, setErr] = useState<string | null>(null);
 
+    // legal_name, youtube_channel_handle, entity_type are bound to the signed
+    // CMA (legal_name + entity_type embedded in document_version_hash) or the
+    // verified channel (youtube_channel_handle). Editable here would silently
+    // de-sync from the signed artifact, so they're displayed as read-only.
     const dirty =
         displayName !== profile.display_name ||
-        legalName !== profile.legal_name ||
-        youtube !== profile.youtube_channel_handle ||
         bio !== (profile.creator_bio || '');
 
     async function persistProfile() {
@@ -80,8 +106,6 @@ function ProfileEditor({ profile, onChanged }: { profile: Profile; onChanged: ()
             method: 'PATCH',
             body: JSON.stringify({
                 display_name: displayName,
-                legal_name: legalName,
-                youtube_channel_handle: youtube,
                 creator_bio: bio,
             }),
         });
@@ -173,7 +197,7 @@ function ProfileEditor({ profile, onChanged }: { profile: Profile; onChanged: ()
                     disabled={saving || uploading}
                     className="bg-base-200 rounded-md px-4 py-2 text-sm hover:bg-base-300 disabled:opacity-60"
                 >
-                    {saving ? 'Saving…' : '← back to grid'}
+                    {saving ? 'Saving…' : '← back to folio'}
                 </button>
             </div>
 
@@ -210,6 +234,7 @@ function ProfileEditor({ profile, onChanged }: { profile: Profile; onChanged: ()
                 </section>
 
                 <section className="space-y-3">
+                    {/* Editable: display name + bio first. */}
                     <label className="grid grid-cols-[110px_1fr] gap-3 items-center">
                         <span className="text-sm text-base-content/60 text-right">Display name</span>
                         <input
@@ -222,34 +247,6 @@ function ProfileEditor({ profile, onChanged }: { profile: Profile; onChanged: ()
                             lang="en"
                             value={displayName}
                             onChange={e => setDisplayName(e.target.value)}
-                            className="input input-bordered bg-base-200 w-full"
-                        />
-                    </label>
-                    <label className="grid grid-cols-[110px_1fr] gap-3 items-center">
-                        <span className="text-sm text-base-content/60 text-right">Legal name</span>
-                        <input
-                            title="Legal name -- for KYC and royalty disbursement"
-                            type="text"
-                            placeholder="legal name"
-                            autoCapitalize="words"
-                            autoCorrect="off"
-                            spellCheck={false}
-                            value={legalName}
-                            onChange={e => setLegalName(e.target.value)}
-                            className="input input-bordered bg-base-200 w-full"
-                        />
-                    </label>
-                    <label className="grid grid-cols-[110px_1fr] gap-3 items-center">
-                        <span className="text-sm text-base-content/60 text-right">YouTube</span>
-                        <input
-                            title="YouTube channel handle -- e.g. @samplecreator"
-                            type="text"
-                            placeholder="@youtube"
-                            autoCapitalize="none"
-                            autoCorrect="off"
-                            spellCheck={false}
-                            value={youtube}
-                            onChange={e => setYoutube(e.target.value)}
                             className="input input-bordered bg-base-200 w-full"
                         />
                     </label>
@@ -271,6 +268,27 @@ function ProfileEditor({ profile, onChanged }: { profile: Profile; onChanged: ()
                             <BioCounter bio={bio} />
                         </div>
                     </label>
+                    {/* Read-only: identity facts bound to onboarding artifacts.
+                        Placed at the bottom to deemphasize and separate from
+                        the editable fields above. */}
+                    <div className="grid grid-cols-[110px_1fr] gap-3 items-center pt-3 border-t border-base-300">
+                        <span className="text-sm text-base-content/60 text-right">Legal name</span>
+                        <div
+                            title="Bound to the Creator Master Agreement you signed at onboarding. Embedded in the CMA document hash; changes require a contract amendment, not a profile edit."
+                            className="font-mono text-sm"
+                        >
+                            {profile.legal_name || '—'}
+                        </div>
+                    </div>
+                    <div className="grid grid-cols-[110px_1fr] gap-3 items-center">
+                        <span className="text-sm text-base-content/60 text-right">YouTube</span>
+                        <div
+                            title="Bound to your verified YouTube channel at onboarding; not editable. Contact support for a channel transfer."
+                            className="font-mono text-sm"
+                        >
+                            {profile.youtube_channel_handle || '—'}
+                        </div>
+                    </div>
                 </section>
             </div>
 

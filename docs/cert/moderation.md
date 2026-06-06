@@ -176,13 +176,14 @@ The gate is structurally deterministic on `(tier0_clean, tier1_clean)`. Human va
 |---|---|
 | drm | parent subsystem |
 | image_spec | upstream gate (the only other active MVP DRM module); a `pending_review` image has already cleared this |
+| image_report | upstream surface for THIRD-PARTY reports on already-published images; this module reviews `image_reports` rows alongside the initial pending_review queue |
 | /docs/deferred/drm_csam.md | MMP successor for automated Tier 0 CSAM (PhotoDNA) |
 | /docs/deferred/drm_adult.md | MMP successor for automated Tier 1 (Hive) |
 | /docs/deferred/drm_ncii.md | MMP successor for automated Tier 0 NCII |
 | R71 §2.2 step 5 | MVP workflow spec (two-checkbox founder/moderator review) |
 | R71 §3.6 `image_reviews` | data model |
 | R71 §3.7 rows 6a / 6b | admin queue + decision endpoints |
-| R71 §3.8 image lifecycle | `pending_review` → `draft` / `taken_down` state machine |
+| R71 §3.8 image lifecycle | `pending_review` -> `draft` / `taken_down` state machine |
 | Constitution INV-09 | server-side gates may call vetted external APIs (NCMEC handoff permitted) |
 
 ---

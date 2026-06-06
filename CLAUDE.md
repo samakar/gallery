@@ -10,7 +10,7 @@ Cards are workflows (orchestrators). Subsystems are functional capabilities invo
 
 ## Reading Order Per Task
 
-1. /docs/constitution.md -- non-negotiable invariants (INV-NN)
+1. The Invariants section of this file (INV-NN) -- non-negotiable constraints
 2. /docs/sad.md -- system architecture overview
 3. The SDD for the subsystem or workflow you are working in
 4. The ICD for any subsystem your code consumes
@@ -21,10 +21,9 @@ Cards are workflows (orchestrators). Subsystems are functional capabilities invo
 
 ```
 /                                    repo root
-  claude.md                          stays at root for Claude Code discovery
+  claude.md                          stays at root for Claude Code discovery (includes the Invariants list)
   src/                               code (mirrors docs by name)
   docs/                              all design docs
-    constitution.md
     sad.md
     R71_Gallery_MVP_Specification.md authoritative gallery spec
     R62_Gallery_Protocol.md          reference architecture (R-series, flat at docs root)
@@ -115,20 +114,20 @@ All design docs and WSD files in this repo are written for Claude Code consumpti
 - Output paths: /mnt/user-data/outputs/
 - Source paths (read-only): /mnt/project/
 
-## Constitution Reference
+## Invariants
 
-Full invariants in /docs/constitution.md (not yet authored; the highlights below are the operative source until it exists). Highlights:
+Operative non-negotiable constraints. Every design doc, ADR, and implementation decision is bound by these. Changes to any INV-NN require an ADR explicitly naming the affected invariant.
 
 - INV-01: The image is the asset. The deed is the receipt. Never invert.
 - INV-02: Platform MUST NOT hold buyer private keys; Path 1 decryption uses buyer-signed challenge.
 - INV-03: Ingestion gates MUST be deterministic. Client-side gates fully deterministic; server-side ML gates deterministic within classifier_version (replay-tested per build).
 - INV-04: No pixel modification of the Master after ingestion; watermarks applied at render time. (MVP per R71: render-time watermarking is visible Cloudinary overlays only -- PREVIEW text, monogram, in-pixel URL text; the invisible / spectrographic watermark is deferred to MMP, see /docs/deferred/drm_spectrographic.md.)
 - INV-05: 30-day post-purchase settlement period; no resale listing before.
-- INV-06: Multi-sig 3-of-5 required for deed-state mutations to rights-disputed, void, burned.
+- INV-06: Multi-sig 3-of-5 approval required for deed-state mutations to rights-disputed, void, burned. Operative enforcement at MVP is the procedural admin tool described in /docs/registry/mint_architecture.md OI-01 (3-of-5 ops approvers each sign the operation payload off-chain via ed25519; HOT_OPS_KEY signs the on-chain `update_metadata_v1` or burn instruction only after the threshold is met; signed approvals appended to a tamper-evident audit log). On-chain Squads multi-sig is NOT required by this invariant; the procedural workflow + signed log are the operative enforcement. Migration to on-chain Squads at scale is an ADR-gated amendment, not an architectural shortfall.
 - INV-07: No anonymous mint; creator (3-layer) and buyer (card-verified) MUST be identity-bound.
 - INV-08: C2PA manifest is append-only; nothing is rewritten or removed. (MVP per R71: no C2PA manifest is produced -- C2PA handling is deferred to MMP, see /docs/deferred/drm_c2pa.md; the invariant binds once manifests exist.)
 - INV-09: Client-side ingestion validators MUST NOT make external network calls. Server-side gates (moderation, RoP, authenticity, malware) may call vetted external APIs.
 - INV-10: deed_state transitions are total; any unspecified transition is a bug, not a default.
 
 ---
-*Last Updated: 05/26/26 14:30*
+*Last Updated: 26/06/03 01:50*

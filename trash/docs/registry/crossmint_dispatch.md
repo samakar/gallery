@@ -1,4 +1,6 @@
-# Crossmint Dispatch (Registry)
+# Crossmint Dispatch (Registry) -- SUPERSEDED
+
+> **Status: SUPERSEDED by /docs/registry/cnft_dispatch.md.** This module documents the shipped MVP implementation (Crossmint Minting API). The target architecture (self-mint Bubblegum V2 cNFT, Path 4) is in /docs/registry/mint_architecture.md; the implementation contract is /docs/registry/cnft_dispatch.md. This doc remains in tree for historical context until the cNFT dispatcher ships; see /docs/divergences.md D-14 for the shipped-vs-target gap.
 
 Mint deed via the Crossmint Minting API. Embeds `arweave_uri`, `enc_final`, `sha256` + `phash` (M+00 dual anchors per R62 §4.3 / [ADR-0005](../adr/adr_0005_phash_in_deed_and_uniqueness_gate.md)), royalty fields from `rights.getDeedRightsParams`, and `license_acceptance_signing_event_id` into the deed metadata. Returns the Crossmint mint job id immediately; the terminal `minting → confirmed/failed` transition arrives via `crossmint_webhook`. Called by Commerce's `run_image_ops` at step (e).
 
