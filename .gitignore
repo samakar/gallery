@@ -20,11 +20,12 @@ vite.config.js
 prisma/dev.db
 prisma/dev.db-journal
 
-# Encrypted Master ciphertexts -- per-image AES-256-GCM bytes persisted by
-# arweave_master.persistEncryptedMasterLocal. Required at runtime for
-# /v1/deeds/:imageId/download-master (operative download source per R71 §1.1).
-# Regenerable: re-run runImageOps for any image whose ciphertext is missing.
-data/encrypted_masters/
+# Runtime artifacts -- encrypted Master ciphertexts (per-image AES-256-GCM
+# bytes persisted by arweave_master.persistEncryptedMasterLocal, required at
+# runtime for /v1/deeds/:imageId/download-master), plus any other dev-time
+# scratch the platform writes here. Regenerable: re-run runImageOps for any
+# image whose ciphertext is missing.
+data/
 
 # Logs
 *.log
