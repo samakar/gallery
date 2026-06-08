@@ -120,6 +120,7 @@ model Image {
   takedown_reason             String?
   dek_wrapped                 Bytes? // DEK_image wrapped to platform KEK (env-secret); populated post-ESIGN
   arweave_uri                 String? // populated at first sale (§2.4 step 12)
+  arweave_ready_at            DateTime? // stamped by arweave_ready_sweeper when the gateway first serves the Master 200; gates the "Permanent Archive" link on the deed page (avoids exposing a URL that 404s during the ~5-30 min post-upload propagation window)
   sha256                      String? // canonical Master pixels sha256; populated at first sale
   phash                       String? // 64-bit DCT perceptual hash (16-char hex) per ADR-0005; populated at Card 1 uniqueness gate
   image_spec                  String? // JSON per R62 §2.3: { width_px, height_px, color_space, icc_profile, color_depth_bits, file_type, file_size_bytes }; deed `image_spec` block source

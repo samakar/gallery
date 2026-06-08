@@ -24,6 +24,7 @@ import { startBuild } from '../../commerce/run_image_ops';
 // crossmint_webhook helpers no longer needed at this layer; run_image_ops calls
 // applyMintSucceeded directly after the synchronous cNFT mint per ADR-0008.
 import { startStalePaidSweeper } from '../workers/stale_paid_sweeper';
+import { startArweaveReadySweeper } from '../workers/arweave_ready_sweeper';
 import { httpLogger, logger } from '../logger';
 import rateLimit from 'express-rate-limit';
 import Arweave from 'arweave';
@@ -1132,7 +1133,7 @@ app.get('/v1/images/:imageId', async (req, res) => {
     const { user_id } = await authAsync(req);
     const img = await prisma.image.findUnique({
         where: { image_id: req.params.imageId },
-        include: { creator: true, deed: true },
+        include: { creator: { include: { user: true } }, deed: true },
     });
     if (!img) return res.status(404).json({ error: 'NOT_FOUND' });
 
@@ -1226,6 +1227,7 @@ app.get('/v1/images/:imageId', async (req, res) => {
             headshot_url: img.creator.creator_headshot_url,
             bio: img.creator.creator_bio,
             context_video_url: null,
+            wallet_address: img.creator.user.wallet_address ?? null,
         },
         description: img.description,
         viewer_is_owner,
@@ -1239,6 +1241,7 @@ app.get('/v1/images/:imageId', async (req, res) => {
         royalty_recipient: img.creator.display_name,
         image_spec,
         arweave_uri: img.arweave_uri ?? null,
+        arweave_ready_at: img.arweave_ready_at?.toISOString() ?? null,
         sha256: img.sha256 ?? null,
         phash: img.phash ?? null,
         deed_asset_id: img.deed?.asset_id ?? null,
@@ -2146,22 +2149,24 @@ app.post('/v1/deeds/:imageId/download-master', async (req, res) => {
 // Public route: the encrypted Arweave bytes are public-by-design (anyone with
 // the URL can fetch); the encryption protects the content, not the access.
 // No auth required.
-app.get('/a/:imageId', async (req, res) => {
+app.get('/archive/:imageId', async (req, res) => {
     const imageId = req.params.imageId;
     const image = await prisma.image.findUnique({
         where: { image_id: imageId },
         select: { arweave_uri: true },
     });
     if (!image?.arweave_uri) {
-        return res.status(404).json({ error: 'NO_ARWEAVE_URI' });
+        return renderArweaveUnavailableHtml(res, 404, imageId, null,
+            'No archive URL is recorded for this image yet.');
     }
     try {
         const upstream = await fetch(image.arweave_uri);
         if (!upstream.ok) {
-            return res.status(502).json({
-                error: 'ARWEAVE_FETCH_FAILED',
-                upstream_status: upstream.status,
-            });
+            // Fresh uploads commonly 404 at gateway level while Arweave
+            // propagates (~5-30 min from Turbo confirmation). 503 + the
+            // canonical URL lets the user retry or open Arweave directly.
+            return renderArweaveUnavailableHtml(res, 503, imageId, image.arweave_uri,
+                `The permanent archive is still propagating (upstream ${upstream.status}). Try again in a few minutes.`);
         }
         const buf = Buffer.from(await upstream.arrayBuffer());
         res.setHeader('Content-Type', 'application/zip');
@@ -2173,12 +2178,43 @@ app.get('/a/:imageId', async (req, res) => {
         res.setHeader('X-Arweave-Source', image.arweave_uri);
         return res.send(buf);
     } catch (e: any) {
-        return res.status(502).json({
-            error: 'ARWEAVE_FETCH_FAILED',
-            message: e?.message ?? String(e),
-        });
+        return renderArweaveUnavailableHtml(res, 503, imageId, image.arweave_uri,
+            `Couldn't reach the permanent archive: ${e?.message ?? String(e)}`);
     }
 });
+
+// Render the /a/:imageId fallback page when the Arweave fetch can't deliver
+// the .zip. Surfaces the canonical https://arweave.net/<tx_id> URL so the
+// buyer can either retry or open it directly -- key UX guarantee per D-19,
+// since fresh uploads commonly take minutes to propagate.
+function renderArweaveUnavailableHtml(
+    res: Response,
+    status: number,
+    imageId: string,
+    arweaveUri: string | null,
+    message: string,
+): Response {
+    res.status(status);
+    res.setHeader('Content-Type', 'text/html; charset=utf-8');
+    res.setHeader('Cache-Control', 'no-store');
+    const safeImageId = sanitizeFilename(imageId);
+    const safeMessage = message
+        .replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const urlBlock = arweaveUri
+        ? `<p>Direct archive URL:</p>
+        <p><a href="${arweaveUri.replace(/"/g, '&quot;')}" rel="noopener noreferrer" target="_blank" style="font-family: ui-monospace, monospace; word-break: break-all;">${arweaveUri.replace(/&/g, '&amp;').replace(/</g, '&lt;')}</a></p>
+        <p style="font-size: 13px; color: #666;">Open this URL directly in a browser to check propagation status, or refresh this page after a few minutes.</p>`
+        : '';
+    return res.send(`<!DOCTYPE html>
+<html><head><meta charset="utf-8"><title>Archive not ready -- ${safeImageId}</title></head>
+<body style="font-family: -apple-system, system-ui, sans-serif; max-width: 600px; margin: 40px auto; padding: 24px; color: #222;">
+    <h1 style="font-weight: 300; font-size: 22px;">Archive not ready yet</h1>
+    <p>${safeMessage}</p>
+    ${urlBlock}
+    <hr style="border: none; border-top: 1px solid #eee; margin: 32px 0;" />
+    <p style="font-size: 11px; color: #999;">Epimage  |  Image ${safeImageId}</p>
+</body></html>`);
+}
 
 // Collection-level metadata JSON. Solana Explorer / DAS indexers fetch this
 // from the on-chain Collection.uri to populate the Collection page (symbol,
@@ -2345,7 +2381,7 @@ app.post('/v1/admin/refunds/:purchaseId', async (req, res) => {
 app.get('/v1/images/:imageId/deed', async (req, res) => {
     const deed = await prisma.deed.findUnique({
         where: { image_id: req.params.imageId },
-        include: { image: { include: { creator: true } } },
+        include: { image: { include: { creator: { include: { user: true } } } } },
     });
     if (!deed) return res.status(404).json({ error: 'NOT_FOUND' });
 
@@ -2358,10 +2394,12 @@ app.get('/v1/images/:imageId/deed', async (req, res) => {
         image_id: deed.image_id,
         title: deed.image.title,
         creator_display_name: deed.image.creator.display_name,
+        creator_wallet_address: deed.image.creator.user.wallet_address ?? null,
         creation_date: deed.image.creation_date.toISOString(),
         edition: 'Unique',
         asset_id: deed.asset_id,
         arweave_uri: deed.image.arweave_uri ?? '',
+        arweave_ready_at: deed.image.arweave_ready_at?.toISOString() ?? null,
         sha256: deed.image.sha256 ?? '',
         minted_at: deed.minted_at.toISOString(),
         custody_state: states.custody_state,
@@ -2556,4 +2594,5 @@ app.listen(PORT, () => {
     console.log(`[api] listening on http://localhost:${PORT}`);
     void eagerStartupChecks();
     startStalePaidSweeper();
+    startArweaveReadySweeper();
 });

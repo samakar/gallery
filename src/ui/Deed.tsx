@@ -7,26 +7,26 @@
 //     from chain data + Arweave manifest).
 //   * TBD fields -- italic placeholder copy ("TBD"), no weight, no decoration.
 //     Reserves layout space without asserting unknown values (R62 §4.3).
-//
-// Source: Crossmint NFT lookup (registry/crossmint_lookup) for owner +
-//   metadata fetch from arweave_uri.
 
 import { useEffect, useState } from 'react';
 import { useParams, Link } from 'react-router-dom';
+import DeedOnChainRecord from './DeedOnChainRecord';
 
 interface DeedData {
     image_id: string;
     title: string;
     creator_display_name: string;
+    creator_wallet_address: string | null; // Firm; null only if creator wallet not provisioned yet
     creation_date: string;          // ISO -- Firm
     edition: string;                // Firm
     asset_id: string;               // Firm -- cNFT asset_id; shown to buyer as "Deed number"
-    arweave_uri: string;            // Firm
-    sha256: string;                 // Firm (hex)
-    minted_at: string;              // ISO -- Firm
+    arweave_uri: string;            // Firm (canonical permanent URL)
+    arweave_ready_at: string | null; // null until arweave_ready_sweeper confirms the gateway can serve the bytes
+    sha256: string;                 // Firm (hex) -- "data fingerprint"
+    minted_at: string;              // ISO -- Firm (rendered as "Issued")
     custody_state: 'sealed' | 'unsealed' | 'burned';
     legal_state: 'legit' | 'disputed' | 'void';
-    current_owner_wallet: string;   // Firm (from Crossmint lookup)
+    current_owner_wallet: string;   // Firm (Owner address)
     royalty_pct: number;            // Firm
     // TBD fields (R62 §4.3) -- intentionally not auto-derived:
     appraisal_value_usd: number | null;
@@ -34,21 +34,18 @@ interface DeedData {
     provenance_chain_length: number | null;
 }
 
-const USE_MOCK = true;
-
 export default function DeedPage() {
     const { imageId } = useParams();
     const [data, setData] = useState<DeedData | null>(null);
     const [loading, setLoading] = useState(true);
 
     useEffect(() => {
-        if (USE_MOCK) {
-            setData(makeMockDeed(imageId ?? 'abc1d'));
-            setLoading(false);
-            return;
-        }
-        // TODO: GET /v1/images/:imageId/deed (R71 §3.7 row TBD)
-        // TODO: backend joins deeds + registry/crossmint_lookup.getOwner
+        if (!imageId) { setLoading(false); return; }
+        fetch(`/v1/images/${encodeURIComponent(imageId)}/deed`)
+            .then(r => (r.ok ? r.json() : Promise.reject(new Error(`${r.status}`))))
+            .then((d: DeedData) => setData(d))
+            .catch(() => setData(null))
+            .finally(() => setLoading(false));
     }, [imageId]);
 
     if (loading) {
@@ -100,47 +97,36 @@ function Header({ data }: { data: DeedData }) {
     );
 }
 
-// Firm register: monospaced, definite, no italics.
+// Firm register: monospaced, definite, no italics. The on-chain field block
+// is the shared component (DeedOnChainRecord) -- same source as the panel on
+// the image page so labels and the Permanent Archive readiness gate stay
+// consistent across surfaces. The royalty row stays here because the deed
+// page exposes it; the image-page panel renders it in a prose paragraph.
 function FirmSection({ data }: { data: DeedData }) {
     return (
         <section className="space-y-4">
             <h2 className="text-base font-light">On-chain record</h2>
+            <DeedOnChainRecord
+                variant="page"
+                data={{
+                    image_id: data.image_id,
+                    asset_id: data.asset_id,
+                    custody_state: data.custody_state,
+                    legal_state: data.legal_state,
+                    owner_wallet: data.current_owner_wallet,
+                    creator_wallet: data.creator_wallet_address,
+                    arweave_uri: data.arweave_uri || null,
+                    arweave_ready_at: data.arweave_ready_at,
+                    sha256: data.sha256 || null,
+                    phash: null,
+                    minted_at: data.minted_at,
+                }}
+            />
             <dl className="grid grid-cols-[auto_1fr] gap-x-6 gap-y-3 text-sm">
-                <Firm label="Deed number" value={data.asset_id} mono truncate />
-                <Firm label="Owner wallet" value={data.current_owner_wallet} mono truncate />
-                <Firm label="Arweave URI" value={data.arweave_uri} mono truncate />
-                <Firm label="SHA-256" value={data.sha256} mono truncate />
-                <Firm label="Minted" value={new Date(data.minted_at).toISOString().slice(0, 10)} mono />
-                <Firm label="Royalty" value={`${data.royalty_pct}%`} mono />
+                <dt className="text-base-content/60">Royalty</dt>
+                <dd className="font-mono text-xs">{data.royalty_pct}%</dd>
             </dl>
         </section>
-    );
-}
-
-function Firm({
-    label,
-    value,
-    mono = false,
-    truncate = false,
-}: {
-    label: string;
-    value: string;
-    mono?: boolean;
-    truncate?: boolean;
-}) {
-    return (
-        <>
-            <dt className="text-base-content/60">{label}</dt>
-            <dd
-                className={[
-                    mono ? 'font-mono text-xs' : '',
-                    truncate ? 'truncate' : '',
-                ].join(' ')}
-                title={truncate ? value : undefined}
-            >
-                {value}
-            </dd>
-        </>
     );
 }
 
@@ -201,10 +187,6 @@ function Footer({ data }: { data: DeedData }) {
                 ← Back to image
             </Link>
             <a
-                // cNFTs are Merkle-tree leaves, not on-chain accounts.
-                // Solana Explorer's /address/ view resolves cNFT asset_ids via DAS
-                // and renders the asset properly when found.
-                // TODO: drive ?cluster from a VITE_SOLANA_NETWORK env var at mainnet deploy.
                 href={`https://explorer.solana.com/address/${data.asset_id}?cluster=devnet`}
                 target="_blank"
                 rel="noopener noreferrer"
@@ -214,29 +196,4 @@ function Footer({ data }: { data: DeedData }) {
             </a>
         </footer>
     );
-}
-
-// -------------------------------------------------------------------
-// DEV mock
-// -------------------------------------------------------------------
-
-function makeMockDeed(imageId: string): DeedData {
-    return {
-        image_id: imageId,
-        title: 'After the rain',
-        creator_display_name: 'Sample Creator',
-        creation_date: '2026-04-15',
-        edition: 'Unique',
-        asset_id: 'AssetIdMock1111111111111111111111111111111',
-        arweave_uri: 'https://arweave.net/abcdefghijklmnopqrstuvwxyz1234567890ABCD',
-        sha256: 'a3f1c9e2b4d6f8e0a3f1c9e2b4d6f8e0a3f1c9e2b4d6f8e0a3f1c9e2b4d6f8e0',
-        minted_at: '2026-05-01T14:22:00Z',
-        custody_state: 'sealed',
-        legal_state: 'legit',
-        current_owner_wallet: '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU',
-        royalty_pct: 10,
-        appraisal_value_usd: null,
-        last_sale_price_usd: null,
-        provenance_chain_length: null,
-    };
 }

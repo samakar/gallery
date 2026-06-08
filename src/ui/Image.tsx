@@ -14,6 +14,8 @@ import { api, getActiveRole } from './api';
 import { getDidToken } from './magic';
 import { BuyWizard, shouldResumeBuyWizard } from './BuyWizard';
 import { computePrintAndFrame } from '../commerce/print_size';
+import DeedOnChainRecord from './DeedOnChainRecord';
+import CertificateOfAuthenticity from './CertificateOfAuthenticity';
 
 type RenderState =
     | 'public-presale'   // visibility=public, status=live -> Listing preview + "Own this"
@@ -49,6 +51,7 @@ interface ImageData {
         headshot_url: string | null;
         bio: string | null;
         context_video_url: string | null;
+        wallet_address: string | null;
     };
     description: string;
     viewer_is_owner: boolean;
@@ -74,6 +77,7 @@ interface ImageData {
     image_width_px: number | null;
     image_height_px: number | null;
     arweave_uri: string | null;
+    arweave_ready_at: string | null;
     sha256: string | null;
     phash: string | null;
     deed_asset_id: string | null;
@@ -190,7 +194,17 @@ function PrivateStub({ data }: { data: ImageData }) {
                     </p>
                 )}
             </section>
-            <CoaPanel data={data} />
+            <CertificateOfAuthenticity
+                data={{
+                    image_id: data.image_id,
+                    title: data.title,
+                    creator_display_name: data.creator.display_name,
+                    creation_date: data.creation_date,
+                    edition: data.edition,
+                    isa_signed_at: data.isa_signed_at,
+                    deed_asset_id: data.deed_asset_id,
+                }}
+            />
         </main>
     );
 }
@@ -803,7 +817,17 @@ function ListingPage({
             </div>
 
             {/* Collapsible CoA panel */}
-            <CoaPanel data={data} />
+            <CertificateOfAuthenticity
+                data={{
+                    image_id: data.image_id,
+                    title: data.title,
+                    creator_display_name: data.creator.display_name,
+                    creation_date: data.creation_date,
+                    edition: data.edition,
+                    isa_signed_at: data.isa_signed_at,
+                    deed_asset_id: data.deed_asset_id,
+                }}
+            />
 
             {/* Collapsible Deed panel */}
             <DeedPanel data={data} />
@@ -1194,86 +1218,12 @@ function MonogramModal({ onConfirm }: { onConfirm: (m: string) => void }) {
     );
 }
 
-function CoaPanel({ data }: { data: ImageData }) {
-    const creator = data.creator.display_name;
-    const title = data.title || 'Untitled';
-    const creationDate = data.creation_date
-        ? new Date(data.creation_date).toLocaleDateString(undefined, {
-            year: 'numeric', month: 'long', day: 'numeric',
-        })
-        : '—';
-    // ISA -- the creator's authorship affirmation signed at Card 1. This is
-    // the CoA's signature event; once signed, it stands independently of any
-    // future deed mint or purchase.
-    const esignedAt = data.isa_signed_at
-        ? new Date(data.isa_signed_at).toLocaleString(undefined, {
-            year: 'numeric', month: 'long', day: 'numeric',
-            hour: 'numeric', minute: '2-digit',
-        })
-        : null;
-    return (
-        <details className="bg-base-200 rounded-md group">
-            <summary className="cursor-pointer px-4 py-2 text-sm text-center list-none flex items-center justify-center select-none text-base-content/55">
-                <span>Certificate of Authenticity</span>
-                <span className="ml-2 text-base-content/40 text-xs transition-transform group-open:rotate-180">▾</span>
-            </summary>
-            <div className="font-deed px-6 pb-6 pt-2 space-y-4 text-base-content/80">
-                <p className="text-justify leading-relaxed">
-                    This is to certify that the digital photograph identified herein,
-                    titled <em>{title}</em>, is an original and authentic work created
-                    by <strong>{creator}</strong> on {creationDate}, and offered through
-                    the Epimage Gallery as a unique (1 of 1) limited edition.
-                </p>
-
-                <div className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs pt-2 border-t border-base-300">
-                    <span className="text-base-content/50">Title</span>
-                    <span>{title}</span>
-                    <span className="text-base-content/50">Creator</span>
-                    <span>{creator}</span>
-                    <span className="text-base-content/50">Creation date</span>
-                    <span>{creationDate}</span>
-                    <span className="text-base-content/50">Edition</span>
-                    <span>{data.edition || 'Unique (1 of 1)'}</span>
-                    <span className="text-base-content/50">Image ID</span>
-                    <span className="font-mono">{data.image_id}</span>
-                    <span className="text-base-content/50">eSigned by creator</span>
-                    <span>
-                        {esignedAt
-                            ? esignedAt
-                            : data.deed_asset_id
-                                // Deed exists -> the creator HAS signed by definition
-                                // (the deed could not mint without the Card 1 ESIGN
-                                // affirmation per R62 §3.4). Specific timestamp
-                                // missing only when the signature event ID didn't
-                                // get linked to the image row (legacy / seed data).
-                                ? <span>Affirmed by creator</span>
-                                : <span className="text-base-content/40">Pending creator signature</span>}
-                    </span>
-                </div>
-            </div>
-        </details>
-    );
-}
-
 // Redaction marker for fields that aren't known yet (mostly pre-sale). The
-// user requested *******; matched on null from the API.
+// user requested *******; matched on null from the API. Used inside DeedPanel
+// to keep its prose paragraphs and "Your Purchase" block coherent before
+// the deed exists. The shared on-chain block (DeedOnChainRecord) carries its
+// own redaction handling via the `redaction` prop.
 const REDACTED = '*******';
-
-function redact(v: string | null | undefined): string {
-    return v == null || v === '' ? REDACTED : v;
-}
-
-// Full-hash display. Same monospace styling as the pHash row; font shrunk so
-// the 64-char SHA-256 fits inside the card on one line at typical widths and
-// wraps character-by-character on narrower screens via break-all (hex strings
-// have no natural break points).
-function HashCell({ value }: { value: string }) {
-    return (
-        <span className="font-mono text-[9px] leading-snug break-all">
-            {value}
-        </span>
-    );
-}
 
 function DeedPanel({ data }: { data: ImageData }) {
     // Post-purchase: deed has been minted -> swap the ******* placeholder for
@@ -1291,9 +1241,6 @@ function DeedPanel({ data }: { data: ImageData }) {
         ? new Date(data.creation_date).toLocaleDateString(undefined, {
             year: 'numeric', month: 'long', day: 'numeric',
         })
-        : REDACTED;
-    const mintedAt = data.deed_minted_at
-        ? new Date(data.deed_minted_at).toLocaleString()
         : REDACTED;
 
     return (
@@ -1395,75 +1342,23 @@ function DeedPanel({ data }: { data: ImageData }) {
                     <h4 className="text-xs uppercase tracking-widest text-base-content/50">
                         On-chain Record
                     </h4>
-                    <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
-                        <dt className="text-base-content/50">Custody state</dt>
-                        <dd>{cell(data.custody_state)}</dd>
-                        <dt className="text-base-content/50">Legal state</dt>
-                        <dd>{cell(data.legal_state)}</dd>
-                        <dt className="text-base-content/50">Deed number</dt>
-                        <dd className="font-mono truncate" title={data.deed_asset_id ?? ''}>
-                            {data.deed_asset_id ? (
-                                <a
-                                    // cNFTs are Merkle-tree leaves, not on-chain accounts.
-                                    // Solana Explorer's /address/ view resolves cNFT asset_ids
-                                    // via DAS and renders the asset (owner, metadata, plugins)
-                                    // when found, or "Account does not exist" honestly when
-                                    // DAS hasn't indexed yet. xray's /token/ route falls back
-                                    // to an empty "0 SOL" account view which reads misleadingly.
-                                    // TODO: drive ?cluster from a VITE_SOLANA_NETWORK env var at mainnet deploy.
-                                    href={`https://explorer.solana.com/address/${data.deed_asset_id}?cluster=devnet`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="link link-hover"
-                                >
-                                    {data.deed_asset_id}
-                                </a>
-                            ) : (
-                                cell(null)
-                            )}
-                        </dd>
-                        <dt className="text-base-content/50">Owner wallet</dt>
-                        <dd className="font-mono truncate" title={data.deed_owner_wallet ?? ''}>
-                            {cell(data.deed_owner_wallet)}
-                        </dd>
-                        <dt className="text-base-content/50">Minted at</dt>
-                        <dd>{data.deed_minted_at ? mintedAt : cell(null)}</dd>
-                        <dt className="text-base-content/50">Arweave URI</dt>
-                        <dd className="font-mono truncate" title={data.arweave_uri ?? ''}>
-                            {data.arweave_uri ? (
-                                // Display text is the canonical permanent
-                                // arweave.net URL (verifiable, survives
-                                // platform cessation). Click target is the
-                                // platform proxy /a/<imageId> which streams
-                                // the Arweave bytes back with a friendly
-                                // Content-Disposition filename (es0rx.zip)
-                                // so the buyer's browser saves a recognized
-                                // file. Post-cessation the proxy is gone;
-                                // the canonical arweave.net URL still resolves
-                                // and the buyer fetches directly with a
-                                // recovery client. Per D-19.
-                                <a
-                                    href={`/a/${data.image_id}`}
-                                    target="_blank"
-                                    rel="noopener noreferrer"
-                                    className="link link-hover"
-                                    title="Click to download (proxied); displayed text is the permanent Arweave URI"
-                                >
-                                    {data.arweave_uri}
-                                </a>
-                            ) : (
-                                cell(null)
-                            )}
-                        </dd>
-                        <dt className="text-base-content/50">SHA-256 (M+00)</dt>
-                        <dd className="font-mono">
-                            {data.sha256 ? <HashCell value={data.sha256} /> : cell(null)}
-                        </dd>
-                        <dt className="text-base-content/50">pHash (M+00)</dt>
-                        <dd className="font-mono">
-                            {data.phash ? <HashCell value={data.phash} /> : cell(null)}
-                        </dd>
-                    </dl>
+                    <DeedOnChainRecord
+                        variant="panel"
+                        redaction={isPostPurchase ? 'dash' : 'asterisk'}
+                        data={{
+                            image_id: data.image_id,
+                            asset_id: data.deed_asset_id,
+                            custody_state: data.custody_state,
+                            legal_state: data.legal_state,
+                            owner_wallet: data.deed_owner_wallet,
+                            creator_wallet: data.creator.wallet_address,
+                            arweave_uri: data.arweave_uri,
+                            arweave_ready_at: data.arweave_ready_at,
+                            sha256: data.sha256,
+                            phash: data.phash,
+                            minted_at: data.deed_minted_at,
+                        }}
+                    />
                 </section>
 
                 {/* Technical specification (R62 §2.3 image_spec, Card 2 ingestion) */}
