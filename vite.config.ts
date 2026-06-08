@@ -10,16 +10,13 @@ import { request as httpRequest } from 'node:http';
 // The plugin mounts a connect middleware BEFORE the SPA fallback and forwards
 // raw bytes to the Express API on :3000.
 function archiveProxyPlugin(): Plugin {
-  console.log('[archiveProxyPlugin] module loaded');
   return {
     name: 'epimage-archive-proxy',
     configureServer(server) {
-      console.log('[archiveProxyPlugin] configureServer called -- mounting /archive middleware');
       // Register WITHOUT a path prefix so connect doesn't strip /archive
       // from req.url. We then gate on req.url inside the handler.
       server.middlewares.use((req, res, next) => {
         if (!req.url?.startsWith('/archive/')) return next();
-        console.log(`[archiveProxyPlugin] forwarding ${req.method} ${req.url}`);
         const upstream = httpRequest(
           {
             host: 'localhost',

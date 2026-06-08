@@ -132,7 +132,14 @@ export default function DeedOnChainRecord({
             <dt className="text-base-content/60">Issuance date</dt>
             <dd className={valueMono}>
                 {data.minted_at
-                    ? new Date(data.minted_at).toISOString().slice(0, 10)
+                    ? new Date(data.minted_at).toLocaleString(undefined, {
+                        year: 'numeric',
+                        month: 'short',
+                        day: 'numeric',
+                        hour: 'numeric',
+                        minute: '2-digit',
+                        timeZoneName: 'short',
+                    })
                     : <Cell value={null} redaction={redaction} mono />}
             </dd>
         </dl>

@@ -46,3 +46,8 @@ fixtures/**/*.png
 
 # Hand-collected fixtures (phone photos with real EXIF) -- committed
 !fixtures/cloudinary/PXL_*.jpg
+
+# Underscore-prefixed scripts under scripts/ are local dev helpers (one-off
+# diagnostics, one-shot password derivers, etc.). Convention: `_<name>.ts`
+# means "useful at the terminal, not part of the canonical scripts set."
+scripts/_*.ts

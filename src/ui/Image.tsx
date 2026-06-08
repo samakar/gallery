@@ -1364,13 +1364,34 @@ function DeedPanel({ data }: { data: ImageData }) {
                 {/* Technical specification (R62 §2.3 image_spec, Card 2 ingestion) */}
                 <section className="space-y-2 pt-3 border-t border-base-300">
                     <h4 className="text-xs uppercase tracking-widest text-base-content/50">
-                        Technical Specification
+                        File Properties
                     </h4>
                     <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
+                        <dt className="text-base-content/50">File type</dt>
+                        <dd>{cell(data.image_spec?.file_type)}</dd>
+                        <dt className="text-base-content/50">File size</dt>
+                        <dd>
+                            {data.image_spec
+                                ? `${data.image_spec.file_size_bytes.toLocaleString()} bytes`
+                                : cell(null)}
+                        </dd>
                         <dt className="text-base-content/50">Dimensions</dt>
                         <dd>
                             {data.image_spec
                                 ? `${data.image_spec.width_px} × ${data.image_spec.height_px} px`
+                                : cell(null)}
+                        </dd>
+                        <dt className="text-base-content/50">Created</dt>
+                        <dd>
+                            {data.creation_date
+                                ? new Date(data.creation_date).toLocaleString(undefined, {
+                                    year: 'numeric',
+                                    month: 'short',
+                                    day: 'numeric',
+                                    hour: 'numeric',
+                                    minute: '2-digit',
+                                    timeZoneName: 'short',
+                                })
                                 : cell(null)}
                         </dd>
                         <dt className="text-base-content/50">Color space</dt>
@@ -1381,14 +1402,6 @@ function DeedPanel({ data }: { data: ImageData }) {
                         <dd>
                             {data.image_spec
                                 ? `${data.image_spec.color_depth_bits}-bit`
-                                : cell(null)}
-                        </dd>
-                        <dt className="text-base-content/50">File type</dt>
-                        <dd>{cell(data.image_spec?.file_type)}</dd>
-                        <dt className="text-base-content/50">File size</dt>
-                        <dd>
-                            {data.image_spec
-                                ? `${data.image_spec.file_size_bytes.toLocaleString()} bytes`
                                 : cell(null)}
                         </dd>
                     </dl>
