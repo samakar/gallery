@@ -29,6 +29,12 @@ import { renderOnboardingHtml, renderCoaHtml } from './email_templates';
 
 const POSTMARK_ENDPOINT_EMAIL = 'https://api.postmarkapp.com/email';
 const PLATFORM_BASE_URL = process.env.PLATFORM_BASE_URL ?? 'https://epimage.com';
+// Postmark Stream ID -- the lowercase slug, not the display name. New Postmark
+// servers ship with the default transactional stream under the ID `outbound`,
+// so that's our default. Set POSTMARK_TRANSACTIONAL_STREAM in .env to point at
+// a custom stream (e.g., if you've archived `outbound` and created one named
+// literally `transactional`).
+const POSTMARK_TRANSACTIONAL_STREAM = process.env.POSTMARK_TRANSACTIONAL_STREAM ?? 'outbound';
 
 export type EmailErrorCode =
     | 'EMAIL_NOT_CONFIGURED'
@@ -97,7 +103,7 @@ export async function sendOnboardingCreatorEmail(props: OnboardingCreatorEmailPr
                 content_type: 'application/pdf',
             },
         ],
-        message_stream: 'transactional',
+        message_stream: POSTMARK_TRANSACTIONAL_STREAM,
         idempotency_key: props.idempotency_key ?? `onboarding_creator:${props.cma.signature_id}`,
     });
 }
@@ -127,7 +133,7 @@ export async function sendOnboardingBuyerEmail(props: OnboardingBuyerEmailProps)
                 content_type: 'application/pdf',
             },
         ],
-        message_stream: 'transactional',
+        message_stream: POSTMARK_TRANSACTIONAL_STREAM,
         idempotency_key: props.idempotency_key ?? `onboarding_buyer:${props.bma.signature_id}`,
     });
 }
@@ -170,7 +176,7 @@ export async function sendCoaEmail(props: CoaEmailProps): Promise<SendEmailResul
             { filename: sanitizeFilename(`receipt-${props.image_id}.pdf`), content_base64: receiptPdf.toString('base64'), content_type: 'application/pdf' },
             { filename: sanitizeFilename(`license-${props.image_id}.pdf`), content_base64: licensePdf.toString('base64'), content_type: 'application/pdf' },
         ],
-        message_stream: 'transactional',
+        message_stream: POSTMARK_TRANSACTIONAL_STREAM,
         idempotency_key: props.idempotency_key ?? `coa:${props.image_id}`,
     });
 }
@@ -185,7 +191,7 @@ interface SendEnvelopeInput {
     subject: string;
     html_body: string;
     attachments: Attachment[];
-    message_stream: 'transactional' | 'broadcast';
+    message_stream: string; // Postmark Stream ID (e.g. 'outbound', 'broadcast')
     idempotency_key: string;
 }
 
