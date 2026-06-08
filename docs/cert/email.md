@@ -147,12 +147,20 @@ Workflow                    email.ts                Postmark            Recipien
 
 | Template | R62 §3.5 mapping | Trigger | Attachments | Recipients | Stream |
 |---|---|---|---|---|---|
-| `onboarding_creator` | Onboarding email (CMA) | End of `POST /v1/creator/sign-cma` transaction | PDF: executed CMA; PDF: terms summary; record-retention notice (inline text) | creator | transactional |
-| `onboarding_buyer` | Onboarding email (BMA / MJA) | End of MJA capture at first purchase | PDF: executed MJA (and per-image License Acceptance bundle if applicable); PDF: terms summary; record-retention notice | buyer | transactional |
-| `coa_at_mint` | COA email -- first sale | End of `applyMintSucceeded` in `src/registry/post_mint.ts` | 4 PDFs: Certificate of Authenticity (with thumbnail embedded inline, see §3.3), Title Document, Purchase Receipt, Per-image License Acceptance record. Email BODY also contains: (a) inline thumbnail (cid:thumbnail or `<img>` to platform CDN), (b) link to the deed page (`https://epimage.com/<image_id>/deed`), (c) routing copy noting the four PDFs are attached for retention | creator + buyer (one envelope, both `to`) | transactional |
+| `onboarding_creator` | Onboarding email (CMA) | End of `POST /v1/creator/sign-cma` transaction | PDF: executed CMA; PDF: terms summary; record-retention notice (inline text). Body also carries the recovery-key link (see §3.2.1) | creator | transactional |
+| `onboarding_buyer` | Onboarding email (BMA / MJA) | End of MJA capture at first purchase | PDF: executed MJA (and per-image License Acceptance bundle if applicable); PDF: terms summary; record-retention notice. Body also carries the recovery-key link (see §3.2.1) | buyer | transactional |
+| `coa_at_mint` | COA email -- first sale | End of `applyMintSucceeded` in `src/registry/post_mint.ts` | 4 PDFs: Certificate of Authenticity (with thumbnail embedded inline, see §3.3), Title Document, Purchase Receipt, Per-image License Acceptance record. Email BODY also contains: (a) inline thumbnail (cid:thumbnail or `<img>` to platform CDN), (b) link to the deed page (`https://epimage.com/<image_id>/deed`), (c) routing copy noting the four PDFs are attached for retention, (d) the recovery-key link (see §3.2.1) | creator + buyer (one envelope, both `to`) | transactional |
 | `coa_at_resale` | COA email -- resale / license migration | End of resale dispatch (post-MVP) | Same 4 PDFs, regenerated with new buyer's data | new buyer + (optional) seller | transactional |
 | `report_ack` | Not R62 -- image_report.md OI-04 obligation | When report submitted with reporter_email | None | reporter | transactional |
 | `takedown_notice` | Not R62 -- takedown subsystem | When moderator flips deed_state to taken_down (post-MVP) | None (link to takedown.md surface) | creator + current deed holder | transactional |
+
+### 3.2.1 Recovery-Key Link (Shared Across All Three Templates)
+
+All three Live-MVP templates carry the same one-line paragraph linking to `${PLATFORM_BASE_URL}/recovery-key`:
+
+> *Your Epimage wallet's recovery key is held by Magic, not Epimage. You can retrieve it any time -- [here's how](.../recovery-key).*
+
+The URL is wired in [`src/cert/email.ts`](../../src/cert/email.ts) at all three send sites. The destination is the public `/recovery-key` instructions page rendered by [`src/ui/RecoveryKey.tsx`](../../src/ui/RecoveryKey.tsx); end-to-end flow + rationale in [identity.md §2.6.1](identity.md#261-recovery-key-retrieval). Same link text + same target across templates so users see the same prompt at every touchpoint (welcome and every purchase).
 
 ### 3.3 PDF Bundle Composition (R62 §3.5)
 
@@ -246,4 +254,4 @@ Postmark webhook posts to `POST /webhooks/postmark` on bounce / complaint / spam
 | Constitution INV-10 | deed_state transitions are total; takedown email tracks the on-chain mutation |
 
 ---
-*Last Updated: 26/06/05 12:00*
+*Last Updated: 26/06/07 18:15*

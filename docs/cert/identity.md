@@ -112,6 +112,13 @@ The row is the canonical authorization gate either way; sign-cma does not re-che
 ### 2.6 Wallet Provisioning Trigger
 On CMA capture (creators) and MJA capture (buyers), invoke Magic's silent wallet provisioning; write the returned `publicAddress` to `users.wallet_address`. Re-auth recovers the same wallet deterministically. The wallet primitive is Registry-owned per INV-4; identity is the trigger only.
 
+### 2.6.1 Recovery Key Retrieval
+The wallet's private key is held by Magic (DKMS), never by Epimage -- INV-02 by construction. Users are pointed to a static instructions page at `/recovery-key` ([`src/ui/RecoveryKey.tsx`](../../src/ui/RecoveryKey.tsx)) that explains the flow and renders one button that opens Magic's per-app hosted portal in a new tab (`VITE_MAGIC_PORTAL_URL`, e.g. `https://reveal.magic.link/epimage`). The user re-auths there with the same email they used at Epimage sign-in, then follows Magic's reveal flow. The `magic.link` address bar in the new tab is the trust anchor -- no iframe.
+
+The same recovery-key URL is linked from three transactional emails ([`src/cert/email_templates.ts`](../../src/cert/email_templates.ts)): the CMA welcome (creator onboarding), the MJA welcome (buyer onboarding), and the COA at-mint (post-purchase). The link text is identical across all three so users see the same message at every touchpoint.
+
+Onboarding does NOT ask users to download or save the key at signup -- it surfaces only the retrieval path, on the principle that users can act on it any time and shouldn't have to manage a downloaded HTML/PDF doc up-front. The client-side "embed-the-key-in-an-HTML-doc" flow discussed during early architecture (R72 deadman-switch context) is NOT implemented at MVP; Magic's hosted portal is the single retrieval surface.
+
 ### 2.7 Creator Profile Capture (at sign-cma)
 `POST /v1/creator/sign-cma` (R71 §3.7 row 4) creates the `creators` row in the same transaction as the CMA `signatures` row (esign). Required profile fields combine R71 §2.1 step 2 + R62 §3.1 (creator-account display fields; image-page rendering per R62 §4.3 depends on these):
 
@@ -233,7 +240,8 @@ Production Google Cloud project must list `youtube.readonly` (and ONLY that scop
 | R62 §4.3 | image-page creator-presence block + Creator Page hero -- consumes the §3.1 fields |
 | Constitution INV-2 | ESIGN precedes role-row creation |
 | Constitution INV-4 | wallet Registry-owned; identity is trigger only |
-| email.md | downstream: `onboarding_creator` template fires post-sign-cma carrying executed CMA PDF (R62 §3.5); `onboarding_buyer` fires post-MJA. Spec'd, deferred to post-MVP per R71 §1.2 |
+| email.md | downstream: `onboarding_creator` template fires post-sign-cma carrying executed CMA PDF (R62 §3.5); `onboarding_buyer` fires post-MJA. Spec'd, deferred to post-MVP per R71 §1.2. Both onboarding templates + `coa_at_mint` carry the §2.6.1 recovery-key link |
+| Constitution INV-02 | platform never holds buyer private keys -- enforced by §2.6.1 (Magic-held DKMS, hosted reveal flow) |
 
 ---
-*Last Updated: 26/06/04 16:00*
+*Last Updated: 26/06/07 18:15*

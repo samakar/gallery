@@ -1,5 +1,5 @@
 /**
- * One-time setup for Bubblegum V2 cNFT minting per /docs/registry/mint_architecture.md §4.
+ * One-time setup for Bubblegum V2 cNFT minting per /docs/registry/deed.md §3.2 (Collection + Tree).
  *
  * Generates four keypairs (Option-a from the proposal -- all hot at MVP, separated for clean
  * rotation to cold custody post-MVP):

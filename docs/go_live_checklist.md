@@ -5,7 +5,7 @@ Operational items that activate only when `epimage.com` flips from "Launching So
 Cross-references:
 - `/docs/divergences.md` (intentional MVP shortcuts whose resolution lives here)
 - `/docs/R71_Gallery_MVP_Specification.md` §1.2 "Out of MVP Scope" (post-MVP feature set)
-- `/docs/registry/mint_architecture.md` OI-NN (`[POST-MVP]` / `[OPERATIONAL]` tagged items)
+- `/docs/registry/deed.md` OI-NN (`[POST-MVP]` / `[OPERATIONAL]` tagged items)
 
 ---
 
@@ -36,13 +36,14 @@ On-chain URI is permanently set to `https://epimage.com/collection.json` (tx `eT
 
 - [ ] **Cover image** -- create `src/app/api/static/collection-cover.png` (recommended >= 512x512, branded; transparent or solid bg). Until present, Explorer falls back to the grey Solana fleur icon.
 - [ ] **Production env** -- confirm `PLATFORM_BASE_URL=https://epimage.com` in production `.env` (it's the default but explicit beats implicit).
+- [ ] **Revert cnft_dispatch `image:` to platform URL (D-16)** -- in `src/registry/cnft_dispatch.ts` `buildDeedMetadataJson`, swap `image: buildThumbnailUrl(input.image_id)` back to `image: \`${PLATFORM_BASE_URL}/i/${input.image_id}?variant=thumbnail\``. Pre-MVP we embed the Cloudinary URL directly because epimage.com is parked; once the production server serves `/i/...` routes, the platform-branded form is correct (CDN-swap-independent, branded link surfaces in marketplaces). This MUST land before the first mainnet mint -- existing devnet test mints will be wiped, but every mainnet mint's `image:` URL is permanent on Arweave. See [divergences D-16](divergences.md), grep for `TODO(MVP-launch)` in cnft_dispatch.ts.
 - [ ] **Platform wallet pubkey** -- set `PLATFORM_WALLET_PUBKEY` explicitly in production `.env` instead of letting it derive from `HOT_MINT_KEY`. Production wallet should be distinct from the fee-payer key.
 - [ ] **DAS refresh after DNS** -- once `epimage.com/collection.json` returns 200 JSON, trigger Helius refresh on the Collection pubkey and every minted deed `asset_id` (one-off script: query Deed table -> POST to Helius refresh endpoint per asset). Without this, DAS keeps serving cached blank metadata for hours-to-days.
 - [ ] **Verify on Explorer** -- Collection page shows symbol `epimage`, Website link, Creators dropdown (platform wallet, verified), cover image renders. Every deed page shows its Thumbnail + clickable `external_url` to `epimage.com/<image_id>`.
 
 ## 3. Arweave
 
-- [ ] **Funding** -- fund Arweave Turbo wallet with real credits sized to expected production mint volume (D-11 was triggered when devnet wallet ran out).
+- [x] **Funding** -- Arweave Turbo wallet funded with $10 (~465 MB capacity, ~58 mints at 8 MB). Verified via test mint 1kqrw on 2026-06-06; D-11 resolved. Top up to whatever covers projected month-one launch volume before production cutover (rule of thumb: $0.20 per 8 MB encrypted Master).
 - [ ] **Remove or repurpose D-11 fallback** -- decide whether the manifest-JSON stub fallback in `src/registry/arweave_master.ts` stays as a safety net or gets removed. If it stays, add a monitoring alert for any fallback firing in production (it's a sign of credit exhaustion, not a benign degraded mode).
 - [ ] **Balance monitoring** -- alert at 30 / 10 / 5 days of projected runway at current mint rate.
 - [ ] **Gateway redundancy** -- the per-deed Arweave URI uses `arweave.net` by default; consider serving via the gateway list (`arweave.dev`, `g8way.io`) when the primary 502s. Test how DAS / Explorer behave if `arweave.net` is briefly unreachable.
@@ -112,7 +113,7 @@ Email is **IN MVP** per R71 §1.1 for the R62 §3.5 legal-artifact subset: onboa
 - [ ] **Re-run `scripts/cnft_setup.ts` on mainnet** -- generates a fresh mainnet Collection + tree. Set `SOLANA_RPC` to a mainnet endpoint before running. Update `PLATFORM_COLLECTION_PUBKEY` and `PLATFORM_TREE_PUBKEY` in production `.env`.
 - [ ] **Re-run `scripts/update_collection_metadata.ts` on mainnet** -- sets the mainnet Collection's URI to `https://epimage.com/collection.json`.
 - [ ] **Production-depth tree** -- dev tree is depth=10, canopyDepth=0 (1,024 leaves). Production target is depth=14+ with non-zero canopy depth so proof size fits in a single tx without lookups. Sizing decision should be made before mainnet setup, not after.
-- [ ] **Cold custody for COLD_RECOVERY_KEY** -- currently hot at MVP per mint_architecture.md OI-04. Migrate to hardware wallet / multisig before launching. The collection's update_authority is the highest-value key in the system.
+- [ ] **Cold custody for COLD_RECOVERY_KEY** -- currently hot at MVP per [deed.md](registry/deed.md) OI-06. Migrate to hardware wallet / multisig before launching. The collection's update_authority is the highest-value key in the system.
 - [ ] **Mainnet Helius / Triton RPC** -- production needs a paid RPC plan; free public RPC won't sustain mint volume + DAS reads.
 
 ## 7. SOL domain (Solana Name Service)

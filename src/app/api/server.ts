@@ -27,7 +27,7 @@ import { startStalePaidSweeper } from '../workers/stale_paid_sweeper';
 import { httpLogger, logger } from '../logger';
 import rateLimit from 'express-rate-limit';
 import Arweave from 'arweave';
-import { generatePlatformDek, decryptMaster } from '../../cert/crypto';
+import { generatePlatformDek, decryptMaster, unwrapDek, buildEncFinalUnwrapped } from '../../cert/crypto';
 import { readEncryptedMasterLocal } from '../../registry/arweave_master';
 import { validateUniqueness, sharpPhashComputer, prismaPerCreatorStore } from '../../cert/image_uniqueness';
 import { captureSignature } from '../../cert/esign';
@@ -35,6 +35,7 @@ import { getLegalDoc, listLegalDocs, type LegalDocType } from '../../cert/legal'
 import { verifyEligibility as verifyYoutubeEligibility, buildAuthorizationUrl as buildYoutubeAuthorizationUrl } from '../../cert/youtube_eligibility';
 import { verifyRecaptchaToken } from '../../cert/recaptcha';
 import { sendOnboardingCreatorEmail, sendOnboardingBuyerEmail, sendCoaEmail, handlePostmarkWebhook } from '../../cert/email';
+import { normalizeTitle, normalizeDescription, normalizeDisplayName, sanitizeFilename } from '../../cert/text_normalize';
 import { Keypair as SolKeypair } from '@solana/web3.js';
 import bs58 from 'bs58';
 
@@ -1120,7 +1121,8 @@ app.get('/v1/me/collection', async (req, res) => {
             share_copy_url: thumbnailUrlFor(d.image_id),
             asset_id: d.asset_id,
             minted_at: d.minted_at.toISOString(),
-            deed_state: d.deed_state,
+            custody_state: d.custody_state,
+            legal_state: d.legal_state,
         })),
     });
 });
@@ -1242,7 +1244,21 @@ app.get('/v1/images/:imageId', async (req, res) => {
         deed_asset_id: img.deed?.asset_id ?? null,
         deed_owner_wallet: img.deed?.owner_wallet_address ?? null,
         deed_minted_at: img.deed?.minted_at?.toISOString() ?? null,
-        deed_state: img.deed?.deed_state ?? null,
+        // Pre-sale: no Deed row exists yet, but the buyer sees a coherent
+        // state machine. Synthetic 'draft' represents "image listed, no deed
+        // issued yet" on the custody axis. Once the deed mints, custody_state
+        // becomes 'sealed'. 'draft' is API-synthetic only; the Deed row's
+        // custody_state column never holds 'draft' so INV-10 totality isn't
+        // widened. legal_state defaults to 'legit' pre-sale and post-mint.
+        custody_state: img.deed?.custody_state ?? 'draft',
+        legal_state: img.deed?.legal_state ?? 'legit',
+        // Owner-bound inner sealed-box exposed once the deed transitions
+        // sealed -> unsealed (first /download-master). Anyone with the deed
+        // owner's wallet privkey can peel this to recover DEK_image and
+        // independently verify the Arweave Master against the on-chain
+        // sha256 anchor. base64 of NaCl sealed-box(DEK_image, wallet_pubkey).
+        // Null pre-open; populated permanently after first download.
+        enc_final_unwrapped: img.deed?.enc_final_unwrapped ?? null,
     });
 });
 
@@ -1273,16 +1289,36 @@ app.patch('/v1/creator/profile', async (req, res) => {
     if (!creator) return res.status(403).json({ error: 'NOT_A_CREATOR' });
 
     const { display_name, legal_name, youtube_channel_handle, creator_bio } = req.body ?? {};
+
+    let nextDisplayName = creator.display_name;
+    if (typeof display_name === 'string') {
+        const r = normalizeDisplayName(display_name);
+        if (!r.ok) return res.status(400).json({ error: r.code, message: r.message });
+        nextDisplayName = r.value;
+    }
+    let nextLegalName = creator.legal_name;
+    if (typeof legal_name === 'string') {
+        const r = normalizeDisplayName(legal_name);
+        if (!r.ok) return res.status(400).json({ error: r.code, message: r.message });
+        nextLegalName = r.value;
+    }
+    let nextBio = creator.creator_bio;
+    if (typeof creator_bio === 'string') {
+        const r = normalizeDescription(creator_bio);
+        if (!r.ok) return res.status(400).json({ error: r.code, message: r.message });
+        nextBio = r.value;
+    }
+
     await prisma.creator.update({
         where: { user_id },
         data: {
-            display_name: typeof display_name === 'string' ? display_name : creator.display_name,
-            legal_name: typeof legal_name === 'string' ? legal_name : creator.legal_name,
+            display_name: nextDisplayName,
+            legal_name: nextLegalName,
             youtube_channel_handle:
                 typeof youtube_channel_handle === 'string'
                     ? youtube_channel_handle
                     : creator.youtube_channel_handle,
-            creator_bio: typeof creator_bio === 'string' ? creator_bio : creator.creator_bio,
+            creator_bio: nextBio,
         },
     });
     res.json({ ok: true });
@@ -1379,6 +1415,15 @@ app.post('/v1/images', imageUpload.single('file'), async (req, res) => {
 
     const creation_date = await extractCreationDate(req.file.buffer);
     const imageSpec = await extractImageSpec(req.file.buffer);
+
+    // Compute the SHA-256 over the original upload bytes -- the actual Master
+    // pixels. We have the buffer in hand from multer, so no Cloudinary
+    // roundtrip. This is the SAME hash that the deed will anchor at mint time
+    // (M+00 in variant_hashes), so what the buyer verifies pre-sale matches
+    // what gets committed on-chain post-sale. arweave_master.ts reads
+    // Image.sha256 (idempotent read-through) instead of re-hashing.
+    const masterSha256 = createHash('sha256').update(req.file.buffer).digest('hex');
+
     const created = await prisma.image.create({
         data: {
             image_id,
@@ -1392,6 +1437,7 @@ app.post('/v1/images', imageUpload.single('file'), async (req, res) => {
             width_px: uploaded.width,
             height_px: uploaded.height,
             phash,
+            sha256: masterSha256,
             image_spec: JSON.stringify(imageSpec),
         },
     });
@@ -1435,11 +1481,24 @@ app.patch('/v1/images/:imageId/metadata', async (req, res) => {
         next_price = c;
     }
 
+    let nextTitle = img.title;
+    if (typeof title === 'string') {
+        const r = normalizeTitle(title);
+        if (!r.ok) return res.status(400).json({ error: r.code, message: r.message });
+        nextTitle = r.value;
+    }
+    let nextDescription = img.description;
+    if (typeof description === 'string') {
+        const r = normalizeDescription(description);
+        if (!r.ok) return res.status(400).json({ error: r.code, message: r.message });
+        nextDescription = r.value;
+    }
+
     await prisma.image.update({
         where: { image_id: img.image_id },
         data: {
-            title: typeof title === 'string' ? title : img.title,
-            description: typeof description === 'string' ? description : img.description,
+            title: nextTitle,
+            description: nextDescription,
             listed_price: next_price,
         },
     });
@@ -1800,6 +1859,7 @@ app.post('/v1/purchases/:purchaseId/start-build', async (req, res) => {
         return res.status(403).json({ error: 'NOT_PURCHASE_OWNER' });
     }
     const { monogram_text } = (req.body ?? {}) as { monogram_text?: string };
+
     try {
         const result = await startBuild({
             purchase_id: purchase.id,
@@ -1836,7 +1896,8 @@ app.get('/v1/purchases/:purchaseId/status', async (req, res) => {
         return res.json({
             status: purchase.status,
             asset_id: purchase.image.deed.asset_id,
-            deed_state: purchase.image.deed.deed_state,
+            custody_state: purchase.image.deed.custody_state,
+            legal_state: purchase.image.deed.legal_state,
         });
     }
 
@@ -1905,13 +1966,15 @@ app.get('/v1/creators/by-handle/:handle', async (req, res) => {
 // Deed-holder Master Image download (R71 §1.1 + R62 §3.5.1).
 // Buyer requests Master download -> server fetches encrypted Master from
 // Arweave, decrypts via unwrapped DEK_image, streams bytes with
-// Content-Disposition: attachment. First successful call flips deed_state
-// from 'sealed' to 'opened' (one-way state machine -- "image extracted
-// from platform-mediated custody"). Subsequent calls are idempotent:
-// re-stream the Master without further state mutation.
+// Content-Disposition: attachment. First successful call flips custody_state
+// from 'sealed' to 'unsealed' (one-way; D-18 seal-break also persists
+// enc_final_unwrapped). Subsequent calls are idempotent: re-stream the
+// Master without further state mutation.
 //
-// MVP scope: deed_state transition is DB-only. On-chain `update_metadata_v1`
-// sync of the deed_state field is post-MVP (see /docs/divergences.md).
+// MVP scope: custody_state transition is DB-only. On-chain `update_metadata_v1`
+// sync is post-MVP (see /docs/divergences.md OI-04). Authorization gate
+// requires BOTH custody axis allows it (sealed | unsealed; burned blocks) AND
+// legal axis allows it (legit; disputed | void blocks).
 app.post('/v1/deeds/:imageId/download-master', async (req, res) => {
     const { user_id } = await authAsync(req);
     if (!user_id) return res.status(401).json({ error: 'AUTH_REQUIRED' });
@@ -1929,10 +1992,11 @@ app.post('/v1/deeds/:imageId/download-master', async (req, res) => {
     if (image.deed.owner_id !== user_id) {
         return res.status(403).json({ error: 'NOT_DEED_HOLDER' });
     }
-    if (['void', 'burned', 'rights-disputed'].includes(image.deed.deed_state)) {
+    if (image.deed.custody_state === 'burned' || image.deed.legal_state !== 'legit') {
         return res.status(403).json({
             error: 'DEED_STATE_BLOCKS_DOWNLOAD',
-            deed_state: image.deed.deed_state,
+            custody_state: image.deed.custody_state,
+            legal_state: image.deed.legal_state,
         });
     }
     if (!image.dek_wrapped) {
@@ -1956,6 +2020,21 @@ app.post('/v1/deeds/:imageId/download-master', async (req, res) => {
                     return res.status(503).json({
                         error: 'MASTER_NOT_RECOVERABLE',
                         message: 'Local encrypted Master is missing and the Arweave URI points at a D-11 manifest stub rather than the encrypted bytes. This image needs to be re-uploaded after the Arweave wallet is funded, or a new purchase needs to be walked through.',
+                    });
+                }
+                // Pre-2026-06-06 ADR-0010 mints (now superseded) wrote a nested
+                // ZIP envelope here. Detect the ZIP magic header (`PK\x03\x04`)
+                // and refuse with a clear error rather than failing decryptMaster
+                // opaquely. Future mints upload R62-aligned AES-256-GCM ciphertext
+                // that decryptMaster can handle.
+                if (
+                    buf.length >= 4
+                    && buf[0] === 0x50 && buf[1] === 0x4b
+                    && buf[2] === 0x03 && buf[3] === 0x04
+                ) {
+                    return res.status(503).json({
+                        error: 'MASTER_LEGACY_ADR_0010_ZIP',
+                        message: 'This image was minted under ADR-0010 (now superseded) and its Arweave copy is a nested ZIP envelope. The platform cannot decrypt it server-side. The buyer can recover via 7-Zip + their wallet signature using the ADR-0010 recovery procedure.',
                     });
                 }
                 ciphertext = buf;
@@ -1990,9 +2069,9 @@ app.post('/v1/deeds/:imageId/download-master', async (req, res) => {
         });
     }
 
-    // State machine: sealed -> opened. Idempotent; subsequent downloads
-    // re-stream without mutating state.
-    if (image.deed.deed_state === 'sealed') {
+    // Custody state machine: sealed -> unsealed. Idempotent; subsequent
+    // downloads re-stream without mutating state.
+    if (image.deed.custody_state === 'sealed') {
         const currentHashes = (() => {
             try { return JSON.parse(image.deed.variant_hashes ?? '{}'); }
             catch { return {}; }
@@ -2004,11 +2083,36 @@ app.post('/v1/deeds/:imageId/download-master', async (req, res) => {
             anchored_at: new Date().toISOString(),
             owner_ordinal: 1,
         };
+
+        // Per the user's 2026-06-07 directive: at the seal-break event, peel
+        // the outer PLATFORM_DEK layer of enc_final and persist the inner
+        // sealed-box on the Deed. The deed-holder can now combine their
+        // wallet privkey + the unwrapped value to independently decrypt the
+        // Arweave Master and verify it matches the on-chain sha256 anchor --
+        // without further platform cooperation. INV-02 preserved: the
+        // disclosed value is owner-wallet-bound; without the privkey it
+        // reveals nothing. PLATFORM_DEK stays secret (AES-256 resists
+        // known-plaintext attacks). Mirroring this to on-chain deed metadata
+        // via Bubblegum updateMetadataV2 is post-MVP (requires DAS
+        // getAssetProof; tracked in /docs/registry/arweave_master.md).
+        let unwrapped: string | null = null;
+        try {
+            if (image.dek_wrapped) {
+                const dek_image = unwrapDek(Buffer.from(image.dek_wrapped));
+                unwrapped = buildEncFinalUnwrapped(dek_image, image.deed.owner_wallet_address);
+            } else {
+                logger.warn({ image_id: imageId }, '[download-master] missing dek_wrapped; cannot compute enc_final_unwrapped');
+            }
+        } catch (e: any) {
+            logger.warn({ image_id: imageId, err: e?.message ?? String(e) }, '[download-master] enc_final_unwrapped computation failed');
+        }
+
         await prisma.deed.update({
             where: { image_id: imageId },
             data: {
-                deed_state: 'opened',
+                custody_state: 'unsealed',
                 variant_hashes: JSON.stringify(currentHashes),
+                enc_final_unwrapped: unwrapped,
             },
         });
     }
@@ -2022,11 +2126,58 @@ app.post('/v1/deeds/:imageId/download-master', async (req, res) => {
         .replace(/^@/, '')
         .replace(/[^A-Za-z0-9]/g, '')
         .toLowerCase();
-    const filename = `epimage_${handleSanitized}_${ownerOrdinal}_${imageId}.jpg`;
+    const filename = sanitizeFilename(
+        `epimage_${handleSanitized}_${ownerOrdinal}_${imageId}.jpg`,
+        `epimage_${imageId}.jpg`,
+    );
     res.setHeader('Content-Type', 'image/jpeg');
     res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
     res.setHeader('Content-Length', String(plaintext.length));
     return res.send(plaintext);
+});
+
+// Arweave-Master proxy per D-19. The deed UI shows the canonical
+// `https://arweave.net/<tx_id>` URL as display text (proves permanence,
+// survives platform cessation) but hyperlinks to /a/<imageId>. Server fetches
+// the Arweave bytes and streams them back with Content-Disposition:
+// attachment; filename="<image_id>.zip" so the buyer's browser saves a
+// recognized .zip file instead of a tx_id-named blob.
+//
+// Public route: the encrypted Arweave bytes are public-by-design (anyone with
+// the URL can fetch); the encryption protects the content, not the access.
+// No auth required.
+app.get('/a/:imageId', async (req, res) => {
+    const imageId = req.params.imageId;
+    const image = await prisma.image.findUnique({
+        where: { image_id: imageId },
+        select: { arweave_uri: true },
+    });
+    if (!image?.arweave_uri) {
+        return res.status(404).json({ error: 'NO_ARWEAVE_URI' });
+    }
+    try {
+        const upstream = await fetch(image.arweave_uri);
+        if (!upstream.ok) {
+            return res.status(502).json({
+                error: 'ARWEAVE_FETCH_FAILED',
+                upstream_status: upstream.status,
+            });
+        }
+        const buf = Buffer.from(await upstream.arrayBuffer());
+        res.setHeader('Content-Type', 'application/zip');
+        res.setHeader('Content-Length', String(buf.byteLength));
+        res.setHeader('Content-Disposition', `attachment; filename="${sanitizeFilename(`${imageId}.zip`)}"`);
+        res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+        // Echo the canonical Arweave URI so technical clients can verify
+        // the proxy fetched from the correct source.
+        res.setHeader('X-Arweave-Source', image.arweave_uri);
+        return res.send(buf);
+    } catch (e: any) {
+        return res.status(502).json({
+            error: 'ARWEAVE_FETCH_FAILED',
+            message: e?.message ?? String(e),
+        });
+    }
 });
 
 // Collection-level metadata JSON. Solana Explorer / DAS indexers fetch this
@@ -2068,30 +2219,58 @@ app.get('/i/:imageId', async (req, res) => {
     //   ?download=1         -> force JPEG variant with Content-Disposition
     //   (no params)         -> auto-pick based on deed state: Share Copy
     //                          post-mint, Listing Preview pre-mint
-    if (req.query.variant === 'thumbnail') {
-        return res.redirect(302, buildThumbnailUrl(img.image_id));
-    }
+    //
+    // Server-side proxy (not 302 redirect): the browser URL bar stays on
+    // epimage.com, never exposing the underlying CDN host. Slightly more
+    // server bandwidth than a redirect, but stable URLs in marketplace UIs
+    // (Solana Explorer's "View Original" stays on the platform domain).
     const isDownload = req.query.download === '1';
-    if (img.deed) {
+    let upstreamUrl: string;
+    if (req.query.variant === 'thumbnail') {
+        upstreamUrl = buildThumbnailUrl(img.image_id);
+    } else if (img.deed) {
         const confirming = await prisma.purchase.findFirst({
             where: { image_id: img.image_id, status: 'confirmed' },
             select: { monogram_text: true },
             orderBy: { completed_at: 'desc' },
         });
         const monogram = confirming?.monogram_text ?? '';
-        return res.redirect(
-            302,
-            isDownload
-                ? buildDownloadUrl(img.image_id, monogram)
-                : buildShareCopyUrl(img.image_id, monogram),
-        );
-    }
-    return res.redirect(
-        302,
-        isDownload
+        upstreamUrl = isDownload
+            ? buildDownloadUrl(img.image_id, monogram)
+            : buildShareCopyUrl(img.image_id, monogram);
+    } else {
+        upstreamUrl = isDownload
             ? buildDownloadUrl(img.image_id, '')
-            : buildListingPreviewUrl(img.image_id),
-    );
+            : buildListingPreviewUrl(img.image_id);
+    }
+    try {
+        const upstream = await fetch(upstreamUrl);
+        if (!upstream.ok) {
+            return res.status(502).json({
+                error: 'UPSTREAM_FAILED',
+                upstream_status: upstream.status,
+            });
+        }
+        const ct = upstream.headers.get('content-type') ?? 'image/jpeg';
+        res.setHeader('Content-Type', ct);
+        // Cache aggressively at the browser + any intermediate CDN. The URL
+        // is content-addressed via image_id + the listing page's `?v=` cache-
+        // buster for post-sale variant flips, so long max-age is safe.
+        res.setHeader('Cache-Control', 'public, max-age=86400, immutable');
+        if (isDownload) {
+            res.setHeader(
+                'Content-Disposition',
+                `attachment; filename="${sanitizeFilename(`${img.image_id}.jpg`)}"`,
+            );
+        }
+        const buf = Buffer.from(await upstream.arrayBuffer());
+        return res.send(buf);
+    } catch (e: any) {
+        return res.status(502).json({
+            error: 'UPSTREAM_FETCH_FAILED',
+            message: e?.message ?? String(e),
+        });
+    }
 });
 
 // Privacy flip -- post-sale owner toggles between public and private.
@@ -2124,9 +2303,9 @@ app.post('/v1/images/:imageId/visibility', async (req, res) => {
 
 // Admin-only takedown. Marks the image taken_down with a reason, flips
 // visibility to private, and (if the deed has been minted) opens a path for
-// downstream multi-sig to flip deed_state -> rights_disputed. The actual
-// multi-sig flow lives in registry/deed_state per INV-06 -- this endpoint
-// only does the local-DB part.
+// downstream multi-sig to flip legal_state -> disputed on the Deed. The
+// actual multi-sig flow lives in registry/deed_state per INV-06 -- this
+// endpoint only does the local-DB image-level part.
 app.post('/v1/admin/images/:imageId/takedown', async (req, res) => {
     const { role } = await authAsync(req);
     if (role !== 'admin') return res.status(403).json({ error: 'ADMIN_REQUIRED' });
@@ -2144,8 +2323,8 @@ app.post('/v1/admin/images/:imageId/takedown', async (req, res) => {
         },
     });
     logger.warn({ image_id: img.image_id, reason }, '[admin.takedown] image taken down');
-    // TODO(deed_state): if img has a deed, kick off the 3-of-5 multi-sig
-    // dispatch to flip deed_state to 'rights_disputed' on-chain. Per INV-06.
+    // TODO(deed legal_state): if img has a deed, kick off the 3-of-5 multi-sig
+    // dispatch to flip legal_state to 'disputed' on-chain. Per INV-06.
     res.json({ ok: true });
 });
 
@@ -2172,6 +2351,9 @@ app.get('/v1/images/:imageId/deed', async (req, res) => {
 
     // Use the real subsystem read; falls back to deed row on mismatch.
     const stateResult = await getDeedState(deed.asset_id);
+    const states = stateResult.ok
+        ? stateResult.states
+        : { custody_state: deed.custody_state, legal_state: deed.legal_state };
     res.json({
         image_id: deed.image_id,
         title: deed.image.title,
@@ -2182,7 +2364,8 @@ app.get('/v1/images/:imageId/deed', async (req, res) => {
         arweave_uri: deed.image.arweave_uri ?? '',
         sha256: deed.image.sha256 ?? '',
         minted_at: deed.minted_at.toISOString(),
-        deed_state: stateResult.ok ? stateResult.deed_state : deed.deed_state,
+        custody_state: states.custody_state,
+        legal_state: states.legal_state,
         current_owner_wallet: deed.owner_wallet_address,
         royalty_pct: 10,
         appraisal_value_usd: null,

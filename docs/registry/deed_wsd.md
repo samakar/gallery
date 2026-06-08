@@ -70,9 +70,7 @@ Per-asset workflow for deed issuance. Spawned as part of Commerce's `run_image_o
 | Doc | Purpose |
 |---|---|
 | arweave_master.md | step 1 |
-| crossmint_dispatch.md | step 4 |
-| crossmint_webhook.md | step 5 |
-| deed_state.md | sets `'sealed'` at step 5 |
+| deed.md | step 4 (dispatch via Bubblegum V2 mintV2) + sets `'sealed'` at step 5 (state machine §2.4) |
 | run_image_ops.md (Commerce) | Workflow orchestrator owning steps 2 and 3 |
 | purchase_wsd.md (Commerce) | Card 4 -- parent workflow |
 | **ADR-0001** | Build trigger: webhook does not spawn; buyer POST does |

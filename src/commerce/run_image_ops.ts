@@ -17,7 +17,7 @@ import { prisma } from '../db';
 import { dispatch } from '../registry/cnft_dispatch';
 import { applyMintSucceeded } from '../registry/post_mint';
 import { buildAndUpload as buildAndUploadArweave } from '../registry/arweave_master';
-import { buildListingPreviewUrl } from './image_gen';
+import { buildListingPreviewUrl, buildOriginalUrl } from './image_gen';
 import { getStripe } from './payments';
 import { unwrapDek, buildEncFinal } from '../cert/crypto';
 
@@ -115,15 +115,20 @@ export async function startBuild(input: StartBuildInput): Promise<StartBuildResu
         },
     });
 
-    const previewUrl = buildListingPreviewUrl(purchase.image_id);
+    // The Arweave-bound payload is the actual Master (original full-resolution
+    // upload bytes), not the listing-preview. buildOriginalUrl returns the
+    // no-transformation Cloudinary delivery URL.
+    const masterUrl = buildOriginalUrl(purchase.image_id);
 
-    // Step (b) per spec: upload the Master to Arweave via Turbo. MVP scope:
-    // uploads a manifest JSON (preview URL + hashes), not the encrypted Master
-    // bytes themselves. Idempotent -- skips if arweave_uri is already set.
+    // Step (b) per spec: upload the encrypted Master to Arweave via Turbo
+    // (R62 §1.5/§2.3 single-layer AES-256-GCM with DEK_image). The doubly-nested
+    // enc_final (asymmetric inner to wallet pubkey + symmetric outer with
+    // PLATFORM_DEK) is constructed below and written to on-chain deed metadata
+    // via cnft_dispatch. Idempotent -- skips if arweave_uri is already set.
     const arweaveResult = await buildAndUploadArweave({
         image_id: purchase.image_id,
         buyer_wallet_pubkey: buyerWallet,
-        preview_url: previewUrl,
+        master_url: masterUrl,
         title: purchase.image.title,
         creator_display_name: purchase.image.creator.display_name,
     });
@@ -161,7 +166,7 @@ export async function startBuild(input: StartBuildInput): Promise<StartBuildResu
         title: purchase.image.title,
         description: purchase.image.description,
         creator_display_name: purchase.image.creator.display_name,
-        preview_url: previewUrl,
+        preview_url: buildListingPreviewUrl(purchase.image_id),
         arweave_uri: arweaveResult.result.arweave_uri,
         sha256: arweaveResult.result.sha256,
         phash: arweaveResult.result.phash,

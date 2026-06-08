@@ -116,7 +116,7 @@ model Image {
   creation_date               DateTime
   listed_price                Int // cents
   status                      String    @default("pending_review")
-  // ^ "pending_review" | "draft" | "live" | "sold" | "taken_down"; forward-compat "rights_disputed"
+  // ^ "pending_review" | "draft" | "live" | "sold" | "taken_down"; forward-compat "disputed"
   takedown_reason             String?
   dek_wrapped                 Bytes? // DEK_image wrapped to platform KEK (env-secret); populated post-ESIGN
   arweave_uri                 String? // populated at first sale (§2.4 step 12)
@@ -278,9 +278,27 @@ model Deed {
   asset_id             String   @unique // Solana cNFT asset_id (Metaplex DAS); was mint_address pre-Bubblegum
   owner_wallet_address String
   owner_id             String
-  deed_state           String   @default("sealed")
-  // ^ "sealed" at MVP; forward-compat: "opened" | "rights_disputed" | "void" | "burned"
+  // Two orthogonal state machines per deed.md §2.3:
+  custody_state        String   @default("sealed") @map("deed_state")
+  // ^ "sealed" | "unsealed" at MVP; forward-compat: "burned" (after voluntary owner-burn
+  //   OR sweeper after legal_state='void' + grace expires). Column is named `deed_state`
+  //   in the DB for migration backward-compat; Prisma field is `custody_state`.
+  legal_state          String   @default("legit")
+  // ^ "legit" | "disputed" | "void" (all forward-compat / MMP). Tracks adjudication
+  //   axis independently of custody. Voluntary owner-burn leaves legal_state='legit'.
   variant_hashes       String // JSON: { "M+00": {sha256, anchored_at}, "E+01": {sha256, anchored_at} }
+  // Per R62 §3.5.1 + the user's 2026-06-07 directive: when a deed transitions
+  // sealed -> unsealed on first Master download, the platform peels the outer
+  // PLATFORM_DEK wrap of enc_final and persists the inner sealed-box here.
+  // Anyone holding the deed-owner's wallet privkey can peel this with their
+  // wallet to recover DEK_image and independently verify the Arweave Master
+  // bytes against the on-chain sha256 anchor. INV-02 preserved: this value
+  // is owner-wallet-bound; without the privkey it reveals nothing.
+  // base64 of NaCl sealed-box(DEK_image, owner_wallet_pubkey).
+  // On-chain mirror via Bubblegum updateMetadataV2 is post-MVP (requires DAS
+  // getAssetProof; Helius mainnet plan). For MVP this column + the deed API
+  // is the operative disclosure surface.
+  enc_final_unwrapped  String?
   minted_at            DateTime
   created_at           DateTime @default(now())
   updated_at           DateTime @updatedAt

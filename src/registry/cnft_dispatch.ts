@@ -1,6 +1,6 @@
 // cnft_dispatch.ts
-// Self-mint Bubblegum V2 cNFT under our MPL-Core Collection per /docs/registry/cnft_dispatch.md
-// and /docs/registry/mint_architecture.md (Path 4).
+// Self-mint Bubblegum V2 cNFT under our MPL-Core Collection per /docs/registry/deed.md
+// (Path 4; consolidated 2026-06-07 from the prior mint_architecture.md + cnft_dispatch.md split).
 //
 // MVP scope (per ADR-0008):
 //   - In-process per-tree mutex (single-instance API; distributed lock at scale, OI-02)
@@ -33,6 +33,7 @@ import {
     findLeafAssetIdPda,
 } from '@metaplex-foundation/mpl-bubblegum';
 import { mplCore } from '@metaplex-foundation/mpl-core';
+import { buildThumbnailUrl } from '../commerce/image_gen';
 
 // --------------------------------------------------------------------------- //
 // Configuration
@@ -383,11 +384,16 @@ function buildDeedMetadataJson(args: BuildMetadataJsonArgs): Record<string, unkn
         // Standard cNFT metadata fields some marketplaces expect
         name: nameForOnchain(input.image_id),
         symbol: 'epimage',
-        // Image is the unwatermarked Thumbnail per R62 §2.2. The URL points at
-        // our platform (epimage.com), not at the underlying CDN, so it stays
-        // valid even if we swap CDN providers. The /i/<image_id>?variant=thumbnail
-        // route redirects to whichever CDN is current.
-        image: `${PLATFORM_BASE_URL}/i/${input.image_id}?variant=thumbnail`,
+        // Image is the unwatermarked Thumbnail per R62 §2.2.
+        // TODO(MVP-launch): swap back to `${PLATFORM_BASE_URL}/i/${input.image_id}?variant=thumbnail`
+        // once epimage.com is hosting the app (currently a parked GoDaddy
+        // page returning 404). Until then we embed the Cloudinary URL
+        // directly so marketplaces/wallets/Solana Explorer render images on
+        // pre-MVP test mints. Trade-off: CDN host (res.cloudinary.com) is
+        // baked into the chain forever; migrate-off-Cloudinary would orphan
+        // these test deeds' images. Acceptable pre-MVP; the post-launch swap
+        // restores the platform-branded URL form for all future mints.
+        image: buildThumbnailUrl(input.image_id),
         // Metaplex standard field. Solana Explorer renders this as "Website".
         // Points at the public image page; same URL whether viewer is signed
         // in or not (the page swaps to private-stub for non-owners post-sale).

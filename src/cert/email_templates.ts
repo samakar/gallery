@@ -19,6 +19,7 @@ export interface OnboardingHtmlProps {
     kind: 'creator' | 'buyer';
     display_name: string;
     doc_label: string;
+    recovery_key_url: string;
 }
 
 export function renderOnboardingHtml(p: OnboardingHtmlProps): string {
@@ -28,6 +29,7 @@ export function renderOnboardingHtml(p: OnboardingHtmlProps): string {
     <h1 style="font-weight: 300; font-size: 24px;">Welcome to Epimage</h1>
     <p>Hi ${escapeHtml(p.display_name)},</p>
     <p>Your ${agreement} (<code>${escapeHtml(p.doc_label)}</code>) is attached as a PDF for your records. The agreement is the legal record of your acceptance; please retain it.</p>
+    <p>Your Epimage wallet's recovery key is held by Magic, not Epimage. You can retrieve it any time -- <a href="${escapeAttr(p.recovery_key_url)}">here's how</a>.</p>
     <p style="font-size: 13px; color: #666;">If you didn't sign this agreement, please contact <a href="mailto:support@epimage.com">support@epimage.com</a> immediately.</p>
     <hr style="border: none; border-top: 1px solid #eee; margin: 32px 0;" />
     <p style="font-size: 11px; color: #999;">Epimage  |  Photographic deeds</p>
@@ -46,6 +48,7 @@ export interface CoaHtmlProps {
     buyer_identifier: string;
     deed_url: string;
     thumbnail_url: string;
+    recovery_key_url: string;
 }
 
 export function renderCoaHtml(p: CoaHtmlProps): string {
@@ -66,6 +69,7 @@ export function renderCoaHtml(p: CoaHtmlProps): string {
         <li>License Acceptance Record</li>
     </ul>
     <p style="font-size: 13px; color: #666;">Please retain these PDFs for your records. They are the buyer-retained copy of the legal artifacts and are admissible as evidence under state blockchain authentication statutes.</p>
+    <p style="font-size: 13px; color: #666;">Your Epimage wallet's recovery key is held by Magic, not Epimage. You can retrieve it any time -- <a href="${escapeAttr(p.recovery_key_url)}">here's how</a>.</p>
     <hr style="border: none; border-top: 1px solid #eee; margin: 32px 0;" />
     <p style="font-size: 11px; color: #999;">Epimage  |  Photographic deeds</p>
 </body></html>`;

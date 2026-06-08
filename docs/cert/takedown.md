@@ -1,6 +1,6 @@
 # Takedown Subsystem
 
-Reactive content removal post-publication. At MVP per R71: public Report intake is a `mailto:` link (no operational module); the founder receives reports and, when justified, sets `images.status = 'taken_down'` with `images.takedown_reason` via an admin tool. Public surfaces (image page, OG / Twitter Card) return 451 / generic content after takedown. Post-mint `deed_state` mutation to `rights-disputed` / `void` / `burned` requires 3-of-5 multi-sig per INV-06 and is deferred to MMP; the full per-regime takedown architecture (DMCA, Take It Down Act, RoP per R62 §4.9) is also deferred.
+Reactive content removal post-publication. At MVP per R71: public Report intake is a `mailto:` link (no operational module); the founder receives reports and, when justified, sets `images.status = 'taken_down'` with `images.takedown_reason` via an admin tool. Public surfaces (image page, OG / Twitter Card) return 451 / generic content after takedown. Post-mint deed-state mutation on either axis (legal_state to `disputed` / `void`, custody_state to `burned`) is gated by INV-06 (3-of-5 multi-sig for legal-axis transitions; sweeper-driven for `custody → burned` after the compliance hold expires; owner-signed for voluntary burn) and is deferred to MMP; the full per-regime takedown architecture (DMCA, Take It Down Act, RoP per R62 §4.9) is also deferred.
 
 ## 1. Interface
 
@@ -34,7 +34,7 @@ Reactive content removal post-publication. At MVP per R71: public Report intake 
 | Post | `images.status = 'taken_down'`; `images.takedown_reason` populated; mutation logged via Pino |
 | Post (idempotent) | already `'taken_down'` -> no-op; original reason preserved |
 | Post (public surfaces) | renderer returns 451 / generic stub per R71 §3.8 |
-| Post (out of scope at MVP) | on-chain `deed_state` is NOT mutated; the deed remains valid on Solana |
+| Post (out of scope at MVP) | on-chain `custody_state` + `legal_state` are NOT mutated; the deed remains in `custody=sealed/unsealed + legal=legit` on Solana |
 
 ### 1.5 Acceptance Criteria
 
@@ -61,7 +61,7 @@ Moderator-only admin surface invokes `recordTakedown`, setting `images.status = 
 Post-takedown, the public image page renderer returns 451 with the listing suppressed (R71 §3.8); the OG / Twitter Card metadata renders generic Gallery branding. The render layer (gallery service) consumes `images.status` to gate.
 
 ### 2.5 No On-Chain Mutation at MVP
-The deed remains valid on Solana after takedown. `deed_state` mutation to `rights-disputed` / `void` / `burned` requires the 3-of-5 multi-sig authority per INV-06 (R62 §3.5.1), deferred to MMP. MVP takedown is platform-side only.
+The deed remains valid on Solana after takedown. `deed_state` mutation to `disputed` / `void` / `burned` requires the 3-of-5 multi-sig authority per INV-06 (R62 §3.5.1), deferred to MMP. MVP takedown is platform-side only.
 
 ### 2.6 Tier 0 Path Handled Elsewhere
 CSAM-driven takedown at moderator-review time (Tier 0) flows through moderation (sets `images.status = 'taken_down'` with `takedown_reason = 'tier0_violation_ncmec_reported'`). The Report-driven post-publication path is the other surface; both write to the same column.

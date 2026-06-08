@@ -134,7 +134,7 @@ The signed URL points at the platform, not at Cloudinary. The platform fronts Cl
 | OI-02 | Cache stampede on cold start -- many simultaneous misses for one (image, owner) pair; single-flight mutex per cache key TBD (in-process Map at MVP; Redis at MMP) |
 | OI-03 | Cache invalidation on takedown -- if `images.status='taken_down'`, existing cached Share Copy should be purged; sweeper keyed on takedown events TBD |
 | OI-04 | `PLATFORM_SIGNING_SECRET` rotation -- env-secret rotation invalidates outstanding URLs; acceptable at MVP (5-min TTL means narrow window) |
-| OI-05 | Forward-compat: deed-holder Master download (Card 7, R62 §3.1) -- separate `serveMasterDownload` flow that transitions `deed_state` `sealed → opened`. MVP scope is Share Copy only |
+| OI-05 | Forward-compat: deed-holder Master download (Card 7, R62 §3.1) -- separate `serveMasterDownload` flow that transitions `deed_state` `sealed → unsealed`. MVP scope is Share Copy only |
 | OI-06 | Range / partial-content support -- MVP serves whole file; range requests for large downloads TBD |
 
 ## 7. Cross-References

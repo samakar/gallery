@@ -4,7 +4,7 @@
 
 Accepted (2026-06-02).
 
-**Dispatch target updated (2026-06-03):** per [ADR-0008](adr_0008_self_mint_bubblegum_v2.md), the dispatch the sweeper retries is now the self-mint dispatcher at [cnft_dispatch.md](../registry/cnft_dispatch.md), not the Crossmint API. Retry semantics unchanged; only the dispatch target shifts. References to "Crossmint" throughout this ADR's narrative should be read as "the mint dispatcher" -- the rest of the buyer-friendly retry model applies identically.
+**Dispatch target updated (2026-06-03):** per [ADR-0008](adr_0008_self_mint_bubblegum_v2.md), the dispatch the sweeper retries is now the self-mint dispatcher at [deed.md](../registry/deed.md), not the Crossmint API. Retry semantics unchanged; only the dispatch target shifts. References to "Crossmint" throughout this ADR's narrative should be read as "the mint dispatcher" -- the rest of the buyer-friendly retry model applies identically.
 
 ## Context
 

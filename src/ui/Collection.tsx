@@ -19,7 +19,8 @@ interface OwnedDeed {
     share_copy_url: string;         // Share Copy thumbnail (R71 §2.7)
     asset_id: string;               // cNFT asset_id -- shown to the buyer as "deed number"
     minted_at: string;              // ISO
-    deed_state: 'sealed' | 'opened' | 'rights_disputed' | 'void' | 'burned';
+    custody_state: 'sealed' | 'unsealed' | 'burned';
+    legal_state: 'legit' | 'disputed' | 'void';
 }
 
 export default function CollectionPage() {
@@ -98,9 +99,9 @@ function DeedGrid({ deeds }: { deeds: OwnedDeed[] }) {
                             </p>
                             <p className="text-xs text-base-content/40">
                                 {new Date(d.minted_at).toLocaleDateString()}
-                                {d.deed_state !== 'sealed' && (
+                                {(d.custody_state !== 'sealed' || d.legal_state !== 'legit') && (
                                     <span className="ml-2 badge badge-xs badge-warning">
-                                        {d.deed_state}
+                                        {d.legal_state !== 'legit' ? d.legal_state : d.custody_state}
                                     </span>
                                 )}
                             </p>

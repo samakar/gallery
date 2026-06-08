@@ -189,3 +189,33 @@ export function buildEncFinal(dek_image: Buffer, buyer_wallet_base58: string): s
     const outer = aesEncrypt(getPlatformDek(), inner);
     return outer.toString('base64');
 }
+
+// Peel the PLATFORM_DEK outer layer of enc_final, returning the inner
+// sealed-box ciphertext (still wallet-bound; only the owner's privkey can
+// decrypt it). Used on first /download-master per R62 §3.5.1 seal-break
+// to publish the unwrapped inner layer to the deed so the owner can
+// independently verify the Arweave Master bytes without further platform
+// cooperation.
+//
+// Cryptographic safety: disclosing the inner sealed-box doesn't leak
+// PLATFORM_DEK (AES-256 resists known-plaintext attacks). Without the
+// owner's wallet privkey the disclosed value reveals nothing.
+export function peelEncFinalOuter(enc_final_base64: string): string {
+    const outerBuf = Buffer.from(enc_final_base64, 'base64');
+    const inner = aesDecrypt(getPlatformDek(), outerBuf);
+    return inner.toString('base64');
+}
+
+// Same result as peeling enc_final's outer layer, but computed directly
+// from local primitives: unwrap DEK_image from dek_wrapped, seal to the
+// owner's wallet pubkey. Useful when enc_final isn't held locally but
+// the source data is (e.g. the /download-master endpoint reads
+// images.dek_wrapped + deeds.owner_wallet_address). Output is base64 of
+// the sealed-box ciphertext, byte-equivalent FOR DECRYPTION PURPOSES to
+// peelEncFinalOuter(enc_final) -- sealed-box uses ephemeral keys, so the
+// raw bytes differ from any prior seal, but both decrypt to the same
+// DEK_image when the owner peels with their privkey.
+export function buildEncFinalUnwrapped(dek_image: Buffer, owner_wallet_base58: string): string {
+    const inner = sealToSolanaWallet(dek_image, owner_wallet_base58);
+    return inner.toString('base64');
+}

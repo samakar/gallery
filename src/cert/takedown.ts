@@ -6,7 +6,7 @@
 // Tier 0 pre-publication CSAM-driven takedown flows through moderation, not
 // this module. This is for live/sold images flagged via the public Report
 // mailto link or moderator self-discovery.
-// Post-mint deed_state mutation (rights-disputed / void / burned) requires
+// Post-mint deed legal_state / custody_state mutations (disputed / void / burned) require
 // 3-of-5 multi-sig per INV-06 and is deferred to MMP.
 
 import { prisma } from '../db';

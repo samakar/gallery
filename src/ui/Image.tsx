@@ -79,7 +79,8 @@ interface ImageData {
     deed_asset_id: string | null;
     deed_owner_wallet: string | null;
     deed_minted_at: string | null;
-    deed_state: string | null;
+    custody_state: 'draft' | 'sealed' | 'unsealed' | 'burned';
+    legal_state: 'legit' | 'disputed' | 'void';
 }
 
 export default function ImagePage({ imageId: imageIdProp }: { imageId?: string } = {}) {
@@ -1005,7 +1006,7 @@ function PostPurchaseActions({
                         setDownloadError(null);
                         try {
                             // POST -> server decrypts the Master from Arweave +
-                            // PLATFORM_DEK, flips deed_state sealed->opened
+                            // PLATFORM_DEK, flips custody_state sealed->unsealed
                             // (first call only), streams bytes with
                             // Content-Disposition: attachment. Use a blob URL
                             // + dynamic <a download> click to trigger the
@@ -1044,8 +1045,8 @@ function PostPurchaseActions({
                             a.click();
                             a.remove();
                             URL.revokeObjectURL(url);
-                            // deed_state transitioned; refresh parent so the
-                            // Deed of Ownership panel shows 'opened'.
+                            // custody_state transitioned; refresh parent so the
+                            // Deed of Ownership panel shows 'unsealed'.
                             onChanged?.();
                         } catch (e: any) {
                             setDownloadError(e?.message ?? 'Download failed.');
@@ -1262,6 +1263,18 @@ function redact(v: string | null | undefined): string {
     return v == null || v === '' ? REDACTED : v;
 }
 
+// Full-hash display. Same monospace styling as the pHash row; font shrunk so
+// the 64-char SHA-256 fits inside the card on one line at typical widths and
+// wraps character-by-character on narrower screens via break-all (hex strings
+// have no natural break points).
+function HashCell({ value }: { value: string }) {
+    return (
+        <span className="font-mono text-[9px] leading-snug break-all">
+            {value}
+        </span>
+    );
+}
+
 function DeedPanel({ data }: { data: ImageData }) {
     // Post-purchase: deed has been minted -> swap the ******* placeholder for
     // a subtle "—" so the panel doesn't look noisy when most fields are real.
@@ -1383,8 +1396,10 @@ function DeedPanel({ data }: { data: ImageData }) {
                         On-chain Record
                     </h4>
                     <dl className="grid grid-cols-[auto_1fr] gap-x-4 gap-y-1 text-xs">
-                        <dt className="text-base-content/50">Deed state</dt>
-                        <dd>{cell(data.deed_state)}</dd>
+                        <dt className="text-base-content/50">Custody state</dt>
+                        <dd>{cell(data.custody_state)}</dd>
+                        <dt className="text-base-content/50">Legal state</dt>
+                        <dd>{cell(data.legal_state)}</dd>
                         <dt className="text-base-content/50">Deed number</dt>
                         <dd className="font-mono truncate" title={data.deed_asset_id ?? ''}>
                             {data.deed_asset_id ? (
@@ -1416,11 +1431,23 @@ function DeedPanel({ data }: { data: ImageData }) {
                         <dt className="text-base-content/50">Arweave URI</dt>
                         <dd className="font-mono truncate" title={data.arweave_uri ?? ''}>
                             {data.arweave_uri ? (
+                                // Display text is the canonical permanent
+                                // arweave.net URL (verifiable, survives
+                                // platform cessation). Click target is the
+                                // platform proxy /a/<imageId> which streams
+                                // the Arweave bytes back with a friendly
+                                // Content-Disposition filename (es0rx.zip)
+                                // so the buyer's browser saves a recognized
+                                // file. Post-cessation the proxy is gone;
+                                // the canonical arweave.net URL still resolves
+                                // and the buyer fetches directly with a
+                                // recovery client. Per D-19.
                                 <a
-                                    href={data.arweave_uri}
+                                    href={`/a/${data.image_id}`}
                                     target="_blank"
                                     rel="noopener noreferrer"
                                     className="link link-hover"
+                                    title="Click to download (proxied); displayed text is the permanent Arweave URI"
                                 >
                                     {data.arweave_uri}
                                 </a>
@@ -1429,11 +1456,13 @@ function DeedPanel({ data }: { data: ImageData }) {
                             )}
                         </dd>
                         <dt className="text-base-content/50">SHA-256 (M+00)</dt>
-                        <dd className="font-mono truncate" title={data.sha256 ?? ''}>
-                            {cell(data.sha256)}
+                        <dd className="font-mono">
+                            {data.sha256 ? <HashCell value={data.sha256} /> : cell(null)}
                         </dd>
                         <dt className="text-base-content/50">pHash (M+00)</dt>
-                        <dd className="font-mono">{cell(data.phash)}</dd>
+                        <dd className="font-mono">
+                            {data.phash ? <HashCell value={data.phash} /> : cell(null)}
+                        </dd>
                     </dl>
                 </section>
 

@@ -10,6 +10,7 @@
 //   - coa_at_mint (4-PDF bundle + inline thumbnail) -- at applyMintSucceeded
 
 import { prisma } from '../db';
+import { sanitizeFilename } from './text_normalize';
 import {
     renderCmaPdf,
     renderBmaPdf,
@@ -83,6 +84,7 @@ export async function sendOnboardingCreatorEmail(props: OnboardingCreatorEmailPr
         kind: 'creator',
         display_name: props.creator_display_name,
         doc_label: props.cma.document_version_label,
+        recovery_key_url: `${PLATFORM_BASE_URL}/recovery-key`,
     });
     return sendEnvelope({
         to: props.to,
@@ -90,7 +92,7 @@ export async function sendOnboardingCreatorEmail(props: OnboardingCreatorEmailPr
         html_body: html,
         attachments: [
             {
-                filename: `cma-${props.cma.document_version_label}.pdf`,
+                filename: sanitizeFilename(`cma-${props.cma.document_version_label}.pdf`),
                 content_base64: pdf.toString('base64'),
                 content_type: 'application/pdf',
             },
@@ -112,6 +114,7 @@ export async function sendOnboardingBuyerEmail(props: OnboardingBuyerEmailProps)
         kind: 'buyer',
         display_name: props.buyer_display_name,
         doc_label: props.bma.document_version_label,
+        recovery_key_url: `${PLATFORM_BASE_URL}/recovery-key`,
     });
     return sendEnvelope({
         to: props.to,
@@ -119,7 +122,7 @@ export async function sendOnboardingBuyerEmail(props: OnboardingBuyerEmailProps)
         html_body: html,
         attachments: [
             {
-                filename: `mja-${props.bma.document_version_label}.pdf`,
+                filename: sanitizeFilename(`mja-${props.bma.document_version_label}.pdf`),
                 content_base64: pdf.toString('base64'),
                 content_type: 'application/pdf',
             },
@@ -155,16 +158,17 @@ export async function sendCoaEmail(props: CoaEmailProps): Promise<SendEmailResul
         buyer_identifier: props.buyer_identifier,
         deed_url: deedUrl,
         thumbnail_url: props.coa.thumbnail_url,
+        recovery_key_url: `${PLATFORM_BASE_URL}/recovery-key`,
     });
     return sendEnvelope({
         to: props.to.join(', '),
         subject: `Your deed is ready -- "${props.title}"`,
         html_body: html,
         attachments: [
-            { filename: `coa-${props.image_id}.pdf`, content_base64: coaPdf.toString('base64'), content_type: 'application/pdf' },
-            { filename: `title-${props.image_id}.pdf`, content_base64: titlePdf.toString('base64'), content_type: 'application/pdf' },
-            { filename: `receipt-${props.image_id}.pdf`, content_base64: receiptPdf.toString('base64'), content_type: 'application/pdf' },
-            { filename: `license-${props.image_id}.pdf`, content_base64: licensePdf.toString('base64'), content_type: 'application/pdf' },
+            { filename: sanitizeFilename(`coa-${props.image_id}.pdf`), content_base64: coaPdf.toString('base64'), content_type: 'application/pdf' },
+            { filename: sanitizeFilename(`title-${props.image_id}.pdf`), content_base64: titlePdf.toString('base64'), content_type: 'application/pdf' },
+            { filename: sanitizeFilename(`receipt-${props.image_id}.pdf`), content_base64: receiptPdf.toString('base64'), content_type: 'application/pdf' },
+            { filename: sanitizeFilename(`license-${props.image_id}.pdf`), content_base64: licensePdf.toString('base64'), content_type: 'application/pdf' },
         ],
         message_stream: 'transactional',
         idempotency_key: props.idempotency_key ?? `coa:${props.image_id}`,

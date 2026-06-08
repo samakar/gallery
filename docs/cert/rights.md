@@ -53,7 +53,7 @@ Per-image License Acceptance text template carrying field-of-use, territory, ter
 ### 2.3 No Enforcement Here
 - On-chain royalty enforcement on resale -> Metaplex Core royalty plugin (onchain subsystem) at deed mint
 - Contractual rights binding -> License Acceptance ESIGN (esign subsystem) at purchase
-- Takedown / rights-disputed mutation -> takedown subsystem (and 3-of-5 multi-sig per INV-06 -- MMP)
+- Takedown / disputed mutation -> takedown subsystem (and 3-of-5 multi-sig per INV-06 -- MMP)
 
 ## 3. Non-Functional Requirements
 

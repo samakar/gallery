@@ -29,6 +29,7 @@ import DeedPage from './Deed';
 import AdminReviewsPage from './AdminReviews';
 import YoutubeVerifyPage from './YoutubeVerify';
 import SignCmaPage from './SignCma';
+import RecoveryKey from './RecoveryKey';
 
 export default function App() {
   return (
@@ -47,6 +48,7 @@ export default function App() {
       {/* CMA signing (identity.md §2.7 + creator_onboarding_wsd.md step 6). */}
       <Route path="/creator/sign-cma" element={<SignCmaPage />} />
       <Route path="/collection" element={<CollectionPage />} />
+      <Route path="/recovery-key" element={<RecoveryKey />} />
       <Route path="/admin/reviews" element={<AdminReviewsPage />} />
       {/* /<image_id>/deed stays imageId-specific (deeds always belong to images) */}
       <Route path="/:imageId/deed" element={<DeedPage />} />

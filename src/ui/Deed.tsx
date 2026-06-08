@@ -24,7 +24,8 @@ interface DeedData {
     arweave_uri: string;            // Firm
     sha256: string;                 // Firm (hex)
     minted_at: string;              // ISO -- Firm
-    deed_state: 'sealed' | 'opened' | 'rights_disputed' | 'void' | 'burned';
+    custody_state: 'sealed' | 'unsealed' | 'burned';
+    legal_state: 'legit' | 'disputed' | 'void';
     current_owner_wallet: string;   // Firm (from Crossmint lookup)
     royalty_pct: number;            // Firm
     // TBD fields (R62 §4.3) -- intentionally not auto-derived:
@@ -91,7 +92,9 @@ function Header({ data }: { data: DeedData }) {
                 {data.creator_display_name} · {new Date(data.creation_date).getFullYear()} · {data.edition}
             </p>
             <p className="text-xs text-base-content/50 mt-2">
-                State: <span className="font-mono">{data.deed_state}</span>
+                Custody: <span className="font-mono">{data.custody_state}</span>
+                {' · '}
+                Legal: <span className="font-mono">{data.legal_state}</span>
             </p>
         </header>
     );
@@ -228,7 +231,8 @@ function makeMockDeed(imageId: string): DeedData {
         arweave_uri: 'https://arweave.net/abcdefghijklmnopqrstuvwxyz1234567890ABCD',
         sha256: 'a3f1c9e2b4d6f8e0a3f1c9e2b4d6f8e0a3f1c9e2b4d6f8e0a3f1c9e2b4d6f8e0',
         minted_at: '2026-05-01T14:22:00Z',
-        deed_state: 'sealed',
+        custody_state: 'sealed',
+        legal_state: 'legit',
         current_owner_wallet: '7xKXtg2CW87d97TXJSDpbD5jBkheTqA83TZRuJosgAsU',
         royalty_pct: 10,
         appraisal_value_usd: null,

@@ -1,18 +1,24 @@
 // arweave_master.ts
 // MVP-scope Arweave upload via ArDrive Turbo SDK.
-// Spec: /docs/registry/arweave_master.md (full encryption pipeline).
+// Spec: /docs/registry/arweave_master.md (R62 §1.5 + §2.3 doubly-nested enc_final).
 //
-// MVP-scope divergence (clearly documented):
-//   - Skip the Master encryption layers (image_gen doesn't encrypt at MVP either).
-//     `enc_final` is returned as an empty string.
-//   - Skip the decryptOriginal + canonical-pixels SHA-256 path. Instead we fetch
-//     the public Cloudinary listing preview bytes and hash THOSE. The deed's
-//     M+00 anchor therefore commits to the preview image (good enough for
-//     visual verification + Crossmint metadata; real impl commits to the
-//     canonical-pixels of the Master).
-//   - Upload a small JSON manifest (~1KB) referencing the preview URL + hashes,
-//     not the image bytes themselves. Stays under Turbo's 100KB free-tier
-//     ceiling so we don't need an Arweave wallet with credits.
+// Arweave payload = single-layer ZIP-AES-256 archive containing `<image_id>.jpg`,
+// password = base64(DEK_image). R62 §1.5 architecture preserved: one DEK_image
+// per image, doubly-nested `enc_final = encrypt(encrypt(DEK_image,
+// owner_wallet_pubkey), platform_DEK)` lives on-chain in deed metadata (NOT
+// into the Arweave payload). Recovery is unchanged: owner peels enc_final to
+// recover DEK_image, then opens the Arweave ZIP with the DEK-derived password.
+// ZIP packaging is a UX divergence from R62 §2.3 text ("AES-256-GCM") per D-19;
+// shifts mode to ZIP-native AES-256-CBC for native-tool compatibility on
+// Windows 11 native, macOS Archive Utility, iOS Files, Android Files, Linux
+// unzip 6.0+, and 7-Zip.
+//
+// Local-disk persisted ciphertext is unchanged from R62 §2.3 exact form
+// (raw AES-256-GCM(DEK_image, plaintext)) so /download-master's existing
+// decryptMaster call works without modification.
+//
+// ADR-0010 (nested ZIP with signature-derived inner password) was superseded
+// 2026-06-06; D-19's single-layer ZIP packaging is the operative MVP form.
 //
 // Authentication uses a generated Arweave JWK persisted to .env. First run
 // without ARWEAVE_JWK_BASE64 writes a fresh JWK to disk + prints it for the
@@ -23,8 +29,51 @@ import Arweave from 'arweave';
 import { createHash } from 'node:crypto';
 import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
+import { createRequire } from 'node:module';
 import { prisma } from '../db';
 import { encryptMaster } from '../cert/crypto';
+
+// Bring archiver in via createRequire because the package is CJS without an
+// ESM-default export; the same pattern shipped briefly under ADR-0010 and is
+// kept here for the single-layer ZIP-AES-256 Arweave packaging per D-19.
+const require_ = createRequire(import.meta.url);
+const archiver = require_('archiver');
+const archiverZipEncrypted = require_('archiver-zip-encrypted');
+
+let zipFormatRegistered = false;
+function ensureZipFormatRegistered() {
+    if (zipFormatRegistered) return;
+    (archiver as any).registerFormat('zip-encrypted', archiverZipEncrypted);
+    zipFormatRegistered = true;
+}
+
+// Wrap the plaintext Master JPEG in a single-file ZIP-AES-256 archive (WinZip
+// AE-2 spec) with password = base64(DEK_image). The on-Arweave bytes become
+// `<image_id>.zip` containing `<image_id>.jpg` instead of the raw AES-GCM
+// ciphertext per R62 §2.3 spec text. R62 §1.5 architecture preserved: one
+// DEK_image per image is still the only key needed to decrypt the Arweave
+// bytes; the on-chain enc_final still wraps DEK_image in the doubly-nested
+// envelope per R62 §2.3. Format change is for native-tool UX only.
+async function buildArweaveZip(
+    jpegBuffer: Buffer,
+    image_id: string,
+    password: string,
+): Promise<Buffer> {
+    ensureZipFormatRegistered();
+    const archive = (archiver as any).create('zip-encrypted', {
+        zlib: { level: 8 },
+        encryptionMethod: 'aes256',
+        password,
+    });
+    const chunks: Buffer[] = [];
+    return new Promise<Buffer>((resolve, reject) => {
+        archive.on('data', (chunk: Buffer) => chunks.push(chunk));
+        archive.on('end', () => resolve(Buffer.concat(chunks)));
+        archive.on('error', (err: Error) => reject(err));
+        archive.append(jpegBuffer, { name: `${image_id}.jpg` });
+        archive.finalize();
+    });
+}
 
 // Local encrypted-Master persistence per R71 §1.1 + D-11 follow-through.
 // MVP architecture: platform delivers the Master from this local copy via
@@ -95,10 +144,12 @@ async function getTurbo() {
     return turboClient;
 }
 
-// Fetch the Cloudinary listing preview bytes for hashing. Public URL, no auth.
-async function fetchPreviewBytes(preview_url: string): Promise<Buffer> {
-    const res = await fetch(preview_url);
-    if (!res.ok) throw new Error(`preview fetch failed: ${res.status}`);
+// Fetch the Cloudinary Master (original upload) bytes. Public URL, no auth.
+// These are the full-resolution unwatermarked bytes that the deed anchors
+// at M+00 and that the buyer receives via /v1/deeds/:imageId/download-master.
+async function fetchMasterBytes(master_url: string): Promise<Buffer> {
+    const res = await fetch(master_url);
+    if (!res.ok) throw new Error(`master fetch failed: ${res.status}`);
     const arrBuf = await res.arrayBuffer();
     return Buffer.from(arrBuf);
 }
@@ -106,7 +157,7 @@ async function fetchPreviewBytes(preview_url: string): Promise<Buffer> {
 export interface BuildAndUploadInput {
     image_id: string;
     buyer_wallet_pubkey: string | null;
-    preview_url: string;
+    master_url: string;        // Cloudinary no-transformation delivery URL (buildOriginalUrl)
     title: string;
     creator_display_name: string;
 }
@@ -130,45 +181,68 @@ export async function buildAndUpload(input: BuildAndUploadInput): Promise<Arweav
     }
 
     try {
-        const previewBytes = await fetchPreviewBytes(input.preview_url);
-        const sha256 = createHash('sha256').update(previewBytes).digest('hex');
+        const masterBytes = await fetchMasterBytes(input.master_url);
+        // Reuse Image.sha256 if already populated at certify time -- buyer
+        // sees the same hash pre-sale and the deed's M+00 anchor commits to
+        // the same value post-sale. Re-hash only on the legacy path (pre-cert-
+        // time sha256 deeds) so this stays idempotent. Note: at certify time
+        // we hash the upload buffer directly; here we hash Cloudinary-served
+        // bytes, which can differ if Cloudinary stripped EXIF/metadata. In
+        // that case Image.sha256 (from upload buffer) takes precedence.
+        const existingSha = await prisma.image.findUnique({
+            where: { image_id: input.image_id },
+            select: { sha256: true },
+        });
+        const sha256 = existingSha?.sha256
+            ?? createHash('sha256').update(masterBytes).digest('hex');
 
-        // Encrypt the preview bytes with a per-image DEK, wrap the DEK with
-        // PLATFORM_DEK, persist the wrapped DEK to images.dek_wrapped.
-        const { ciphertext, dek_wrapped, dek_image } = encryptMaster(previewBytes);
-        void dek_image; // run_image_ops re-unwraps for enc_final.
+        // Encrypt the Master bytes with a per-image DEK, wrap the DEK with
+        // PLATFORM_DEK, persist the wrapped DEK to images.dek_wrapped. The
+        // local-disk ciphertext stays R62 §2.3 exact (raw AES-GCM) so
+        // /download-master's decryptMaster path is unchanged. The doubly-
+        // nested envelope `enc_final` (asymmetric inner to wallet pubkey +
+        // symmetric outer with PLATFORM_DEK) is constructed by run_image_ops
+        // and written to on-chain deed metadata, NOT into the Arweave payload.
+        const { ciphertext, dek_wrapped, dek_image } = encryptMaster(masterBytes);
 
         // Persist ciphertext to local disk BEFORE attempting Arweave -- so even
         // if Arweave 402s, the platform-mediated Master download still works
         // (D-11 follow-through). Local copy is the operative download source
-        // at MVP; Arweave is best-effort for the long-term post-cessation path.
+        // at MVP; Arweave is the post-cessation owner-recovery channel.
         await persistEncryptedMasterLocal(input.image_id, ciphertext);
+
+        // Build the Arweave-bound payload: single-layer ZIP-AES-256 containing
+        // <image_id>.jpg per D-19. Password = base64(DEK_image); the on-chain
+        // enc_final still wraps DEK_image so only the owner (or trustee at
+        // cessation) can derive it. Native-tool extract once the password is in
+        // hand.
+        const dekPassword = dek_image.toString('base64');
+        const arweaveZip = await buildArweaveZip(masterBytes, input.image_id, dekPassword);
 
         const turbo = await getTurbo();
 
-        // Try the full encrypted-Master upload. If the Arweave wallet is out
-        // of Turbo credits (HTTP 402), fall back to uploading a tiny manifest
-        // JSON instead -- the deed still gets a real Arweave URI and the
-        // ciphertext stays on the server for later upload when the wallet is
-        // funded. Persist dek_wrapped either way so the asymmetric layer
-        // works at mint time.
+        // Try the upload. If the Arweave wallet is out of Turbo credits (HTTP
+        // 402), fall back to uploading a tiny manifest JSON instead -- the
+        // deed still gets a real Arweave URI and the local ciphertext is the
+        // operative source until the wallet is funded.
         let arweave_uri: string;
         try {
+            const tags = [
+                { name: 'Content-Type', value: 'application/zip' },
+                { name: 'App-Name', value: 'Epimage' },
+                { name: 'App-Version', value: '3-r62-zip' },
+                { name: 'Image-Id', value: input.image_id },
+                { name: 'Sha256', value: sha256 },
+                { name: 'Encryption', value: 'ZIP-AES-256' },
+                { name: 'Encryption-Schema', value: 'zip-aes256-dek-v1' },
+                { name: 'File-Name', value: `${input.image_id}.zip` },
+            ];
             const upload = await turbo.upload({
-                data: ciphertext,
-                dataItemOpts: {
-                    tags: [
-                        { name: 'Content-Type', value: 'application/octet-stream' },
-                        { name: 'App-Name', value: 'Epimage' },
-                        { name: 'App-Version', value: '1-mvp' },
-                        { name: 'Image-Id', value: input.image_id },
-                        { name: 'Sha256', value: sha256 },
-                        { name: 'Encryption', value: 'AES-256-GCM' },
-                        { name: 'Encryption-Schema', value: 'aes-256-gcm-v1' },
-                    ],
-                },
+                data: arweaveZip,
+                dataItemOpts: { tags },
             });
             arweave_uri = `https://arweave.net/${upload.id}`;
+            console.log(`[arweave_master] uploaded ZIP-AES-256 (${arweaveZip.byteLength} bytes) for ${input.image_id} -> ${arweave_uri}`);
         } catch (uploadErr) {
             const msg = (uploadErr as Error)?.message ?? String(uploadErr);
             if (!/Insufficient balance|Status 402/i.test(msg)) {
@@ -177,17 +251,18 @@ export async function buildAndUpload(input: BuildAndUploadInput): Promise<Arweav
             console.warn(
                 '[arweave] Out of Turbo credits. Falling back to manifest-JSON upload. ' +
                 'Fund the wallet at https://turbo.ardrive.io to upload encrypted bytes. ' +
-                `Image ${input.image_id} dek_wrapped is persisted; ciphertext was not uploaded.`,
+                `Image ${input.image_id} dek_wrapped is persisted; payload was not uploaded.`,
             );
             const manifest = {
                 schema: 'epimage.deed.manifest/v1-no-credit-fallback',
                 image_id: input.image_id,
                 title: input.title,
                 creator: input.creator_display_name,
-                preview_url: input.preview_url,
+                master_url: input.master_url,
                 sha256,
                 phash: image?.phash ?? null,
-                note: 'Encrypted Master bytes were not uploaded due to Arweave wallet exhaustion. dek_wrapped is on the platform DB; ciphertext is not yet on Arweave.',
+                intended_encryption: 'ZIP-AES-256',
+                note: 'Encrypted Master bytes were not uploaded due to Arweave wallet exhaustion. dek_wrapped is on the platform DB; payload is not yet on Arweave.',
                 generated_at: new Date().toISOString(),
             };
             const manifestBytes = Buffer.from(JSON.stringify(manifest, null, 2), 'utf-8');

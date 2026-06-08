@@ -363,6 +363,16 @@ export function buildHeadshotUrl(public_id: string, version?: number): string {
     });
 }
 
+// Original asset delivery URL -- NO transformations applied. Returns the
+// exact bytes the creator uploaded (modulo Cloudinary's metadata-stripping
+// defaults). Used by arweave_master to encrypt + nested-ZIP the actual
+// full-resolution Master for Arweave (not the listing preview). Buyer's
+// post-purchase /download-master decrypts these bytes and serves the Master
+// to the deed holder.
+export function buildOriginalUrl(image_id: string): string {
+    return cloudinary.url(image_id, { secure: true });
+}
+
 // Square thumbnail for grid views (Creator dashboard, Collection).
 export function buildThumbnailUrl(image_id: string): string {
     return cloudinary.url(image_id, {

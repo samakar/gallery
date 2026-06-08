@@ -221,8 +221,88 @@ export default function Backdoor() {
             >
               {undoing ? 'Sending…' : 'Send test email (Postmark + CMA PDF) →'}
             </button>
+            <button
+              type="button"
+              onClick={() => navigate('/recovery-key')}
+              className="link link-hover text-xs text-base-content/50 bg-transparent border-0 p-0"
+            >
+              View /recovery-key page →
+            </button>
+            <button
+              type="button"
+              disabled={undoing}
+              onClick={async () => {
+                setUndoing(true);
+                setUndoError(null);
+                try {
+                  // Pre-flight: must be signed in via Magic with Solana wallet
+                  const isLoggedIn = await magic.user.isLoggedIn();
+                  if (!isLoggedIn) {
+                    setUndoError('Sign in via Magic first ("Continue with Google" at top of page).');
+                    return;
+                  }
+                  // Check Solana wallet was provisioned. Magic SDK returns
+                  // wallets as an OBJECT keyed by chain name (not an array).
+                  // Schema: meta.wallets.solana = { publicAddress: string | null }.
+                  const meta = await magic.user.getInfo();
+                  const solanaWallet = (meta.wallets as any)?.solana;
+                  const address = solanaWallet?.publicAddress;
+                  if (!address) {
+                    setUndoError('Magic user has no Solana wallet. (Are you on the right Magic project? Dedicated Wallet required.)');
+                    return;
+                  }
+
+                  // The actual test: sign the same deterministic challenge twice;
+                  // ed25519 spec guarantees the bytes match. Kept as a dev
+                  // diagnostic for any future signature-based crypto flow.
+                  // ADR-0010 was superseded 2026-06-06 by R62 §1.5 sealed-box.
+                  const challenge = 'epimage:decrypt-key:test-image-id-deterministic';
+                  const encoder = new TextEncoder();
+                  const msg = encoder.encode(challenge);
+
+                  const ext = (magic as any).solana;
+                  if (!ext?.signMessage) {
+                    setUndoError('magic.solana.signMessage missing -- SolanaExtension not loaded.');
+                    return;
+                  }
+
+                  const t0 = Date.now();
+                  const sig1: Uint8Array = await ext.signMessage(msg);
+                  const t1 = Date.now() - t0;
+                  const t2 = Date.now();
+                  const sig2: Uint8Array = await ext.signMessage(msg);
+                  const t3 = Date.now() - t2;
+
+                  const same = sig1.length === sig2.length && sig1.every((b, i) => b === sig2[i]);
+
+                  const hex = (u: Uint8Array) =>
+                    Array.from(u).map(b => b.toString(16).padStart(2, '0')).join('');
+                  const truncate = (s: string) => s.slice(0, 16) + '…' + s.slice(-16);
+
+                  if (same) {
+                    setUndoError(
+                      `✅ Deterministic. Address ${truncate(address)}.\n` +
+                      `Sig (${sig1.length}B): ${truncate(hex(sig1))}\n` +
+                      `Latency: ${t1}ms, ${t3}ms.`,
+                    );
+                  } else {
+                    setUndoError(
+                      `❌ NON-deterministic.\n` +
+                      `Sig1: ${truncate(hex(sig1))}\nSig2: ${truncate(hex(sig2))}`,
+                    );
+                  }
+                } catch (e: any) {
+                  setUndoError(`Test failed: ${e?.message ?? String(e)}`);
+                } finally {
+                  setUndoing(false);
+                }
+              }}
+              className="link link-hover text-xs text-base-content/50 bg-transparent border-0 p-0"
+            >
+              {undoing ? 'Signing…' : 'Test Solana signMessage determinism →'}
+            </button>
             {undoError && (
-              <p className="text-xs text-error">{undoError}</p>
+              <p className="text-xs text-error whitespace-pre-wrap">{undoError}</p>
             )}
           </div>
 
