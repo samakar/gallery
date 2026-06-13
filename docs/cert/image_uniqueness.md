@@ -94,7 +94,19 @@ The pHash from §2.1 is also surfaced to drm_authenticity §2.5 for reverse-imag
 ### 2.6 Adversarial Manipulation Penalties
 Repeated attempts to circumvent uniqueness via adversarial perturbation -> graduated penalties (warn -> temporary suspension -> permanent removal).
 
-## 3. Non-Functional Requirements
+## 3. Architecture
+
+Two-tier detector composition. Tier 1 (perceptual hash) is fast, deterministic, and pinned in [ADR-0005](../adr/adr_0005_phash_in_deed_and_uniqueness_gate.md) so off-platform verifiers can re-implement. Tier 2 (DINOv2 neural embedding) catches stylistic / compositional similarity that pHash misses but requires a vector store and GPU-resident embedder. Tier 1 is active at MVP; Tier 2 ships at MMP with the adapter interface (`DinoV2Embedder`) already in place returning zero-vectors so platform-wide query paths stay wired. Activation flips one adapter binding -- no API change.
+
+Single-compute, multi-consumer pHash. The 64-bit pHash computed at ingestion is the canonical value: written to `images.phash`, embedded in the deed metadata JSON at Card 5, surfaced to `drm_authenticity` §2.5 for reverse-image pre-check, and reused by the uniqueness comparator. No subsystem recomputes it. This collapses both the determinism surface (one algorithm, one input → one output) and the latency budget (one ~100ms compute amortized across four downstream uses).
+
+Two-level comparison axis. Each new ingestion's pHash is queried against (a) the candidate creator's own prior Masters with a relaxed threshold (allowing stylistic consistency across a body of work), and (b) the platform-wide pHash index with a stricter threshold (cross-creator duplication detection). Per-creator hits reject outright with `CREATOR_DUPLICATE`. Platform-wide hits route to the downstream Provenance and Rights Verification module (deferred MVP; the contract is present, the queue handler is a stub). Thresholds are configuration, not code -- tuning happens post-launch on observed false-positive rates.
+
+Storage is column-resident, not table-resident at MVP. `images.phash` (16-char hex) is queried via SQLite SELECT scans at MVP scale (<100k rows; full scan <50ms). At MMP the column promotes to a dedicated index table (`phash_index` with bk-tree or similar Hamming-distance structure) when scan latency exceeds budget. The DINOv2 vector store is a separate concern (Qdrant or pgvector candidate; not selected at MVP because the embedder is stubbed).
+
+Adversarial-manipulation surface is administrative, not algorithmic. The detector does not attempt to be robust against deliberate perturbation attacks (small targeted noise additions designed to escape pHash distance bounds). Instead, repeated submission attempts from the same creator account that trip uniqueness gates trigger graduated penalties (warn → temporary suspension → permanent removal) handled by the moderation subsystem. The detector's role is correctness on honest inputs; abuse handling is the moderation subsystem's role.
+
+## 4. Non-Functional Requirements
 
 | Property | Specification |
 |---|---|
@@ -105,7 +117,7 @@ Repeated attempts to circumvent uniqueness via adversarial perturbation -> gradu
 | Determinism | pHash deterministic; DINOv2 deterministic within model_version |
 | Storage | pHash 8 bytes per Master; DINOv2 768- or 1024-dim float vector |
 
-## 4. Dependencies
+## 5. Dependencies
 
 | Dependency | Role | MVP status |
 |---|---|---|
@@ -115,7 +127,7 @@ Repeated attempts to circumvent uniqueness via adversarial perturbation -> gradu
 | Vector store (pgvector / Qdrant) | per-creator + platform-wide ANN queries | stubbed (returns null) |
 | `RightsReviewQueue` (§7.1.7) | cross-creator review handoff | stubbed (returns `stub-rights-review`) |
 
-## 5. Open Issues
+## 6. Open Issues
 
 | ID | Issue |
 |---|---|
@@ -126,7 +138,7 @@ Repeated attempts to circumvent uniqueness via adversarial perturbation -> gradu
 | OI-05 | Vector-store backend choice (pgvector vs dedicated ANN service) |
 | OI-06 | §7.1.7 manual-review module scope: not MVP; gate hand-off contract still required |
 
-## 6. Cross-References
+## 7. Cross-References
 
 | Doc | Purpose |
 |---|---|
@@ -134,11 +146,11 @@ Repeated attempts to circumvent uniqueness via adversarial perturbation -> gradu
 | [cert/image_spec.md](image_spec.md) | predecessor: format / dimensions / quality gates run before uniqueness |
 | [cert/moderation.md](moderation.md) | successor: runs after uniqueness gate passes |
 | [registry/arweave_master.md](../registry/arweave_master.md) | downstream Card 5 consumer: reads `images.phash` for deed anchoring |
-| [registry/crossmint_dispatch.md](../registry/crossmint_dispatch.md) | embeds `phash` in deed `variant_hashes["M+00"]` |
-| [cert/certify_wsd.md](certify_wsd.md) | calling workflow (Card 1) |
+| [registry/deed.md](../registry/deed.md) | embeds `phash` in deed `variant_hashes["M+00"]` via cnft_dispatch |
+| [workflows/certify_wsd.md](../workflows/certify_wsd.md) | calling workflow (Card 1) |
 | R62 §4.3 | Firm deed-content fields (sha256 + phash dual anchors) |
 | R62 §7.1.2 / §7.1.7 | reference architecture: uniqueness gate + cross-creator review |
 | Constitution INV-03 | determinism |
 
 ---
-*Last Updated: 05/29/26 17:30*
+*Last Updated: 26/06/12 18:00*

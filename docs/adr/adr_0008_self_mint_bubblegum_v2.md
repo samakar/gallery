@@ -8,7 +8,7 @@ Accepted (2026-06-03).
 
 R71 §3.7 and R62 §1 / §2.3 / Card 5 / §4.5 specify Crossmint Minting API as the deed-mint vendor. The shipped implementation (/src/registry/crossmint_dispatch.ts) mints plain Bubblegum cNFT (V1) under Crossmint-controlled tree authority. This was the operative path until 2026-06-02, when two things changed:
 
-1. **Capability probe** of the Crossmint staging account (saved at /crossmint_probe_result.json) confirmed:
+1. **Capability probe** of the Crossmint staging account (raw probe + result retained locally at /sandbox/crossmint_capability_probe.cjs + /sandbox/crossmint_probe_result.json; sandbox is gitignored per the investigation-files rule) confirmed:
    - Default Solana standard = plain Bubblegum cNFT (probe Q1)
    - Burn refused on default collection ("only on EVM, Solana Core Compressed, and Aptos")
    - Uncompressed minting requires a per-project support ticket ("Uncompressed minting for Solana is currently not activated for this project")
@@ -98,7 +98,7 @@ Specifically:
 |---|---|
 | /docs/registry/deed.md | Authoritative architecture analysis behind this decision |
 | /docs/registry/deed.md | Self-mint dispatcher SDD |
-| /docs/registry/r62_r71_alignment.md | Pending edits to R62 and R71 that follow from this decision |
+| /docs/r62_r71_alignment.md | Pending edits to R62 and R71 that follow from this decision |
 | /docs/divergences.md D-14 | Records the shipped-vs-target gap until cnft_dispatch.ts ships |
 | CLAUDE.md (Invariants section) | INV-06 (procedural multisig) maps to this ADR's enforcement model. INV-11 and INV-12 are NOT in the operative invariants list -- they were drafted in an earlier constitution stub and intentionally not promoted; INV-12 (Bubblegum V2 standard) is recorded as a decision in this ADR rather than as an invariant, and INV-11 (200-year permanence) lives in deed.md REQ-MINT-04 |
 | /docs/registry/crossmint_dispatch.md | Predecessor (SUPERSEDED) |
@@ -106,8 +106,8 @@ Specifically:
 | ADR-0001 | Build dispatch decoupled from Stripe webhook -- continues to apply; dispatch target shifts from Crossmint to the self-mint dispatcher |
 | ADR-0007 | Buyer-friendly retry model -- continues to apply; sweeper retries the self-mint dispatcher |
 | ADR-0005 | phash in deed -- continues to apply; phash remains in deed metadata under the new schema |
-| /crossmint_probe_result.json | Empirical evidence supporting the Crossmint disqualification |
+| /sandbox/crossmint_probe_result.json (gitignored; retained locally) | Empirical evidence supporting the Crossmint disqualification; key findings inlined in Context §1 above |
 
 ---
 
-*Last Updated: 26/06/03 01:30*
+*Last Updated: 26/06/12 20:45*

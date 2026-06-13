@@ -36,6 +36,13 @@ Cards are workflows (orchestrators). Subsystems are functional capabilities invo
       <subsystem>_<module>.md        module-level design (interface + internals)
     workflows/
       <workflow>_wsd.md              workflow sequence document
+  test/                              manual / spot-check test scripts (no automated
+                                     framework at MVP); each script is runnable via
+                                     `npx tsx test/<name>.ts`; committed
+  sandbox/                           investigation workspace (paper exercises, format
+                                     comparisons, "what if we tried X" docs); never
+                                     read by running code or referenced from production
+                                     docs; gitignored
 ```
 
 Naming: `<subsystem>_<module>.md`. Lowercase, underscored. Module is omitted for subsystem-level docs. Each design doc contains both the boundary contract (§ Interface) and the internal design (Functional Requirements, Architecture, NFRs, Dependencies) in one file.
@@ -44,7 +51,7 @@ Examples:
   /docs/cert/identity.md                      subsystem-level
   /docs/cert/image_spec.md                 module-level (image-specification ingestion-window gate)
   /docs/cert/moderation.md          module-level (manual two-checkbox review at MVP)
-  /docs/cert/certify_wsd.md                   workflow sequence (function-scoped)
+  /docs/workflows/certify_wsd.md              workflow sequence (function-scoped; all *_wsd.md files live under workflows/)
 
 Note: cert/ is a flat function-grouping folder (Certification function). All subsystems live as flat files inside, named `<subsystem>.md` or `<subsystem>_<module>.md`. Deferred-to-MMP items live at /docs/deferred/.
 
@@ -70,7 +77,7 @@ Note: cert/ is a flat function-grouping folder (Certification function). All sub
 | /src/cert/image_spec.ts | /docs/cert/image_spec.md |
 | /src/cert/moderation.ts | /docs/cert/moderation.md |
 | /src/deferred/ | /docs/deferred/ (MMP-deferred items) |
-| /src/workflows/card1_certify/ | /docs/workflows/card1_certify_wsd.md plus the design docs of subsystems the workflow invokes (read the § Interface section for call surface) |
+| /src/workflows/card1_certify/ | /docs/workflows/certify_wsd.md plus the design docs of subsystems the workflow invokes (read the § Interface section for call surface) |
 
 ## Where New Code Goes
 
@@ -93,8 +100,8 @@ All design docs and WSD files in this repo are written for Claude Code consumpti
 
 | Rule | Apply |
 |---|---|
-| Section order: Interface first, then Functional Requirements, then Architecture (if any), then NFRs, Dependencies, Open Issues, Cross-References | Interface is the stable contract and the most common read; front-load it. FRs and Architecture follow for implementers |
-| Interface section: Inputs -> Outputs -> Error Codes -> Pre/Post Conditions -> Acceptance Criteria | Fixed order within the Interface section |
+| Section order (mandatory + fixed numbering): 1. Interface, 2. Functional Requirements, 3. Architecture, 4. NFRs, 5. Dependencies, 6. Open Issues, 7. Cross-References. Architecture is mandatory (minimum one paragraph) so section numbers stay aligned across subsystems. No "Post-MVP Roadmap" section -- post-MVP items go under Open Issues as OI-NN entries or move to /docs/deferred/. | Interface is the stable contract and the most common read; front-load it. FRs and Architecture follow for implementers. Uniform numbering makes cross-doc references stable. |
+| Interface section: 1.1 either **Inputs** (behavior-centric subsystem; input table) OR **Schema** (when the subsystem's primary contract IS a schema -- e.g., deed, legal_binder), 1.2 Outputs (or Operations when 1.1 is Schema), 1.3 Error Codes, 1.4 Pre/Post Conditions, 1.5 Acceptance Criteria | Most subsystems are behavior-centric. Data-centric ones lead with the Schema table because that table IS the contract; an Inputs table would be unnatural. |
 | No SUMMARY section restating the doc | Title and one-line scope cover this |
 | No design rationale prose unless implementation depends on it | One line at top if needed; otherwise skip |
 | No consumer notes prose | Calling workflow doc tells consumer how to call |
@@ -113,6 +120,7 @@ All design docs and WSD files in this repo are written for Claude Code consumpti
 - Read SKILL.md before any file or code operation
 - Output paths: /mnt/user-data/outputs/
 - Source paths (read-only): /mnt/project/
+- Investigation files -- format comparisons, paper exercises, "what if we tried X" docs that don't drive production code -- live under `/sandbox/`. Never under `/docs/`, `/src/`, or `/data/`. Sandbox is gitignored.
 
 ## Invariants
 

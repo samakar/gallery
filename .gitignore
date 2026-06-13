@@ -27,6 +27,11 @@ prisma/dev.db-journal
 # image whose ciphertext is missing.
 data/
 
+# Investigation workspace -- paper exercises, format comparisons, "what if
+# we tried X" docs. Never read by running code or referenced from production
+# docs. Per CLAUDE.md "Style Conventions" rule.
+sandbox/
+
 # Logs
 *.log
 npm-debug.log*

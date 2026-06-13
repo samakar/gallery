@@ -187,4 +187,4 @@ The gate is structurally deterministic on `(tier0_clean, tier1_clean)`. Human va
 | Constitution INV-09 | server-side gates may call vetted external APIs (NCMEC handoff permitted) |
 
 ---
-*Last Updated: 05/27/26 17:00*
+*Last Updated: 26/05/27 17:00*

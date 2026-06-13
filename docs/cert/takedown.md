@@ -54,6 +54,9 @@ Public Report on every public image page is a `mailto:abuse@epimage.com?subject=
 ### 2.2 Moderator Admin Tool
 Moderator-only admin surface invokes `recordTakedown`, setting `images.status = 'taken_down'` with `images.takedown_reason`. Applies to both `live` (pre-sale) and `sold` (post-mint) images per R71 §3.8 state machine.
 
+### 2.2.1 Encrypted-Master Store Side-Effect
+On a successful takedown, `recordTakedown` calls `encryptedMasterStore.delete(image_id)` ([registry/arweave_master.md §2.7](../registry/arweave_master.md)). Pre-sale images had ciphertext in the store from Card 1; sold images were already cleaned up by the `arweave_ready_sweeper` post-Arweave-ready. Either way, retaining bytes for content the platform will not serve is operationally unwise (CSAM/DMCA cases especially). Best-effort: delete failures are logged inside the store helper, never thrown -- the takedown itself always succeeds.
+
 ### 2.3 Free-Text Reason at MVP
 `images.takedown_reason` is free text (DMCA, RoP, ToS-violation, etc.). R62's structured per-regime taxonomy (§4.9) is deferred. The moderator records the rationale verbatim.
 
@@ -66,7 +69,19 @@ The deed remains valid on Solana after takedown. `deed_state` mutation to `dispu
 ### 2.6 Tier 0 Path Handled Elsewhere
 CSAM-driven takedown at moderator-review time (Tier 0) flows through moderation (sets `images.status = 'taken_down'` with `takedown_reason = 'tier0_violation_ncmec_reported'`). The Report-driven post-publication path is the other surface; both write to the same column.
 
-## 3. Non-Functional Requirements
+## 3. Architecture
+
+Single column drives both intake paths. `images.status` and `images.takedown_reason` are the only persistent state. Whether the takedown originated from a moderator processing a `mailto:abuse@` report, a Tier-0 CSAM hit during pre-publication moderation, or a future structured intake endpoint, the result is the same: `status='taken_down'` + free-text reason. Downstream consumers (public render gate, encrypted-master cleanup, audit log) read only this column, so adding new intake paths is purely an UPSTREAM concern.
+
+Free-text reason at MVP, structured taxonomy deferred. R62 §4.9 prescribes a per-regime enum (DMCA / RoP / ToS / CSAM / court-order / etc.), but MVP records the moderator's free-text rationale verbatim. This trades downstream analytics for shipping speed; the column already accepts both shapes. Migrating to a structured enum is mechanical (read existing rows, classify, backfill) and lands when the PM-09 audit-metadata work begins.
+
+Side-effect on cleanup, not on render. The expensive side-effect is `encryptedMasterStore.delete(image_id)` -- removing the platform's local ciphertext copy so retained bytes don't outlast the takedown decision. Pre-sale images have ciphertext in the store from Card 1; sold images were already swept post-Arweave-ready, so the delete is a no-op. Failure is logged but never thrown -- the takedown record itself always succeeds. Arweave bytes are out of platform control by design and survive the takedown; the public-render gate (status='taken_down' → 451) is what makes the image inaccessible via platform channels.
+
+No on-chain mutation at MVP. The cNFT deed leaf remains exactly as minted. Per INV-06, deed `legal_state` transitions (`legit → disputed → void`) require the 3-of-5 procedural multi-sig (PM-03 in deed.md), and deferred-to-burn (`custody_state → burned`) requires the destruction sweeper (PM-10). Both are deferred to MMP. MVP takedown is platform-state only -- the deed still verifies trustlessly off-chain, but the platform refuses to serve the image. This is intentional: takedown decisions made before the multi-sig governance is operational must not be irreversible on-chain.
+
+Two intake surfaces share the admin tool. The Tier-0 CSAM path flows through the `moderation` subsystem (which calls `recordTakedown` with a fixed reason) at pre-publication review time. The third-party Report path flows through `mailto:abuse@` → moderator inbox → admin-tool entry. Both surfaces share the same admin tool implementation (`recordTakedown` function), differing only in caller context. This keeps the on-platform takedown machinery single-source-of-truth regardless of how the decision was reached.
+
+## 4. Non-Functional Requirements
 
 | Property | Specification |
 |---|---|
@@ -75,7 +90,7 @@ CSAM-driven takedown at moderator-review time (Tier 0) flows through moderation 
 | Latency | manual / admin-driven; not a hot path |
 | Public-surface propagation | CDN purge for the public image page on takedown; <= 60s convergence |
 
-## 4. Dependencies
+## 5. Dependencies
 
 | Dependency | Role |
 |---|---|
@@ -85,7 +100,7 @@ CSAM-driven takedown at moderator-review time (Tier 0) flows through moderation 
 | email subsystem | optional creator notification on takedown -- post-MVP |
 | Pino mutation middleware | audit trail |
 
-## 5. Open Issues
+## 6. Open Issues
 
 | ID | Issue |
 |---|---|
@@ -95,7 +110,7 @@ CSAM-driven takedown at moderator-review time (Tier 0) flows through moderation 
 | OI-04 | Buyer-refund on takedown of sold image: R62 §4.9 specifies refunds on `void` adjudication. At MVP the deed stays valid on-chain; refund policy undecided |
 | OI-05 | Structured `takedown_reason` taxonomy (DMCA / RoP / ToS / CSAM / NCII / etc.) vs current free-text: defer to MMP unless founder review volume forces earlier |
 
-## 6. Cross-References
+## 7. Cross-References
 
 | Doc | Purpose |
 |---|---|
@@ -110,4 +125,4 @@ CSAM-driven takedown at moderator-review time (Tier 0) flows through moderation 
 | Constitution INV-08 | C2PA append-only -- N/A at MVP (no manifests) |
 
 ---
-*Last Updated: 05/27/26 18:00*
+*Last Updated: 26/06/12 18:00*

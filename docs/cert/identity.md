@@ -1,6 +1,6 @@
 # Identity Subsystem
 
-Identity + session + role gate. Magic SDK OAuth (Google / Apple) at the client; Magic admin DID-token verification on every authenticated route at the server. Role grants are row-existence in `creators` / `owners` (no role enum on `users`); the moderator role at MVP is the founder, enforced at the admin-route layer by env-config `magic_did`. The `creator_allowlist` is a hard precondition for sign-cma. Wallet provisioning is triggered here post-ESIGN; the wallet primitive itself is Registry-owned per INV-4.
+Identity + session + role gate. Magic SDK OAuth (Google / Apple) at the client; Magic admin DID-token verification on every authenticated route at the server. Role grants are row-existence in `creators` / `owners` (no role enum on `users`); the moderator role at MVP is the founder, enforced at the admin-route layer by env-config `magic_did`. The launch-phase creator-allowlist gate (`CREATOR_ALLOWLIST_ENABLED` env, §2.4) and the YouTube eligibility gate (§2.8) compose to authorize sign-cma. Wallet provisioning is triggered here post-ESIGN; the wallet primitive itself is Registry-owned per INV-4.
 
 ## 1. Interface
 
@@ -13,10 +13,10 @@ Server-side verification of the `Authorization: Bearer <did_token>` header.
 role ∈ {`creator`, `owner`, `moderator`}.
 
 #### assertCreatorAllowlisted(email)
-Precondition for sign-cma; matched against `creator_allowlist.email`. Auto-populated by `verifyYoutubeEligibility` on threshold pass; manual founder inserts remain valid as an exception path (§2.4).
+Precondition for sign-cma. When `CREATOR_ALLOWLIST_ENABLED=true`, checks the email against the `CREATOR_ALLOWLIST_EMAILS` env list. When `false`, no-op (gate is inert). See §2.4.
 
 #### verifyYoutubeEligibility(user_id, oauth_code)
-Exchanges Google OAuth code for a YouTube `youtube.readonly` access token; calls YouTube Data API v3 `channels.list?part=snippet,statistics&mine=true`; gates on `statistics.subscriberCount >= 100_000`. On pass: persists `youtube_channel_id`, `youtube_channel_handle`, `youtube_subscriber_count_at_onboarding`, `youtube_verified_at` on the user's pending-creator profile and inserts the user's email into `creator_allowlist`. Single-shot gate -- not re-checked after onboarding (§2.8).
+Exchanges Google OAuth code for a YouTube `youtube.readonly` access token; calls YouTube Data API v3 `channels.list?part=snippet,statistics&mine=true`; gates on `statistics.subscriberCount >= 100_000`. On pass: persists `youtube_channel_id`, `youtube_channel_handle`, `youtube_subscriber_count_at_onboarding`, `youtube_verified_at` on the user's pending-creator profile. Single-shot gate -- not re-checked after onboarding (§2.8).
 
 #### provisionWalletIfMissing(user_id)
 Called by esign immediately after CMA / MJA capture. Idempotent on `users.wallet_address`.
@@ -31,7 +31,9 @@ Authenticated principal: `{ user_id, magic_did, email, oauth_provider, wallet_ad
 |---|---|
 | MAGIC_DID_INVALID | DID token verification failed |
 | ROLE_REQUIRED | principal lacks the required role |
-| CREATOR_NOT_ALLOWLISTED | email not in `creator_allowlist` at sign-cma |
+| CREATOR_NOT_ALLOWLISTED | `CREATOR_ALLOWLIST_ENABLED=true` and the user's email is not in `CREATOR_ALLOWLIST_EMAILS` |
+| ROLE_CONFLICT_USER_IS_BUYER | sign-cma attempted but the user already has an `owners` row (MVP single-role exclusivity, §2.3) |
+| ROLE_CONFLICT_USER_IS_CREATOR | first-purchase MJA capture attempted but the user already has a `creators` row (MVP single-role exclusivity, §2.3) |
 | YOUTUBE_OAUTH_FAILED | Google OAuth code exchange or `channels.list` / `playlistItems.list` call failed |
 | YOUTUBE_NO_CHANNEL | OAuth succeeded but the Google account has no associated YouTube channel |
 | YOUTUBE_INSUFFICIENT_SUBSCRIBERS | `subscriberCount < 100_000` |
@@ -48,9 +50,9 @@ Per R71 §3.7.
 |---|---|
 | Pre | authenticated routes carry `Authorization: Bearer <did_token>` |
 | Post (verify pass) | `users` row exists for `magic_did`; created on first sight |
-| Post (allowlist hit) | `users.email` matches a `creator_allowlist` row |
+| Post (allowlist gate pass) | When `CREATOR_ALLOWLIST_ENABLED=true`, `users.email` is in `CREATOR_ALLOWLIST_EMAILS`; otherwise no-op |
 | Post (wallet provision) | `users.wallet_address` populated; idempotent on re-auth |
-| Post (YouTube eligibility pass) | `creator_allowlist` row inserted for `users.email`; `youtube_channel_id`, `youtube_channel_handle`, `youtube_subscriber_count_at_onboarding`, `youtube_verified_at` persisted on the pending-creator profile; values frozen at onboarding -- not refreshed |
+| Post (YouTube eligibility pass) | `youtube_channel_id`, `youtube_channel_handle`, `youtube_subscriber_count_at_onboarding`, `youtube_verified_at` persisted on the pending-creator profile; values frozen at onboarding -- not refreshed. No allowlist side-effect (the allowlist is a separate launch-phase gate per §2.4). |
 
 ### 1.5 Acceptance Criteria
 
@@ -60,18 +62,21 @@ Per R71 §3.7.
 | AC-02 | expired / forged DID | any authed route | `MAGIC_DID_INVALID` |
 | AC-03 | first OAuth | `POST /v1/auth/session` | `users` row created; wallet NULL pending ESIGN |
 | AC-04 | re-auth same identity | session call | same row + same wallet recovered |
-| AC-05 | email not in allowlist | `POST /v1/creator/sign-cma` | `CREATOR_NOT_ALLOWLISTED` |
+| AC-05 | `CREATOR_ALLOWLIST_ENABLED=true` and email not in `CREATOR_ALLOWLIST_EMAILS` | `POST /v1/creator/sign-cma` | `CREATOR_NOT_ALLOWLISTED` |
+| AC-05b | `CREATOR_ALLOWLIST_ENABLED=false` (gate inert) | `POST /v1/creator/sign-cma` | allowlist gate passes regardless of email |
 | AC-06 | non-moderator | `POST /v1/admin/reviews/*` | `ROLE_REQUIRED` |
-| AC-07 | YouTube OAuth + channel with 250k subs | `POST /v1/creator/youtube/verify` | persists profile fields; inserts `creator_allowlist` row; sign-cma now succeeds |
-| AC-08 | YouTube OAuth + channel with 42k subs | `POST /v1/creator/youtube/verify` | `YOUTUBE_INSUFFICIENT_SUBSCRIBERS`; no allowlist row inserted; sign-cma still blocked |
-| AC-08b | YouTube OAuth + 250k subs + 2 uploads in last 180 days + `YOUTUBE_DORMANCY_ENABLED=true` | `POST /v1/creator/youtube/verify` | `YOUTUBE_DORMANT_CHANNEL`; no allowlist row inserted |
-| AC-08c | YouTube OAuth + 250k subs + 8 uploads in last 180 days + `YOUTUBE_DORMANCY_ENABLED=true` | `POST /v1/creator/youtube/verify` | pass; allowlist row inserted; `youtube_*` fields persisted |
+| AC-06b | user with existing `owners` row attempts sign-cma | `POST /v1/creator/sign-cma` | `ROLE_CONFLICT_USER_IS_BUYER`; no Signature row created |
+| AC-06c | user with existing `creators` row attempts first-purchase MJA capture | first-purchase MJA capture | `ROLE_CONFLICT_USER_IS_CREATOR`; no Signature row created |
+| AC-07 | YouTube OAuth + channel with 250k subs | `POST /v1/creator/youtube/verify` | persists `youtube_*` profile fields; sign-cma's YouTube gate now passes (allowlist gate still consulted independently if `CREATOR_ALLOWLIST_ENABLED=true`) |
+| AC-08 | YouTube OAuth + channel with 42k subs | `POST /v1/creator/youtube/verify` | `YOUTUBE_INSUFFICIENT_SUBSCRIBERS`; no `youtube_*` fields persisted; sign-cma's YouTube gate still fails |
+| AC-08b | YouTube OAuth + 250k subs + 2 uploads in last 180 days + `YOUTUBE_DORMANCY_ENABLED=true` | `POST /v1/creator/youtube/verify` | `YOUTUBE_DORMANT_CHANNEL`; no `youtube_*` fields persisted |
+| AC-08c | YouTube OAuth + 250k subs + 8 uploads in last 180 days + `YOUTUBE_DORMANCY_ENABLED=true` | `POST /v1/creator/youtube/verify` | pass; `youtube_*` fields persisted |
 | AC-08d | YouTube OAuth + 250k subs + 0 uploads ever + `YOUTUBE_DORMANCY_ENABLED=false` (MVP default) | `POST /v1/creator/youtube/verify` | pass; dormancy gate skipped entirely; `recent_upload_count=0` returned |
 | AC-09 | YouTube OAuth + channel with hidden sub count | `POST /v1/creator/youtube/verify` | `YOUTUBE_HIDDEN_SUBSCRIBERS`; remediation message asks creator to unhide and retry |
 | AC-10 | OAuth code revoked / channels.list 401 | `POST /v1/creator/youtube/verify` | `YOUTUBE_OAUTH_FAILED` |
 | AC-11 | Google account with no YouTube channel | `POST /v1/creator/youtube/verify` | `YOUTUBE_NO_CHANNEL` |
 | AC-12 | post-onboarding subscriber count drops below 100k | any creator route | no effect; profile fields are a frozen onboarding snapshot (OI-07) |
-| AC-13 | second creator OAuth-verifies a channel already bound to user A | `POST /v1/creator/youtube/verify` on user B | `YOUTUBE_CHANNEL_ALREADY_CLAIMED`; no allowlist row inserted for user B; user A's binding unaffected |
+| AC-13 | second creator OAuth-verifies a channel already bound to user A | `POST /v1/creator/youtube/verify` on user B | `YOUTUBE_CHANNEL_ALREADY_CLAIMED`; no `youtube_*` fields persisted for user B; user A's binding unaffected |
 | AC-14 | same creator re-runs the verify flow after a prior pass | `POST /v1/creator/youtube/verify` | `ALREADY_VERIFIED` (409); no token exchange, no API call, no DB write -- short-circuit at the entry gate |
 
 ## 2. Functional Requirements
@@ -79,7 +84,7 @@ Per R71 §3.7.
 ### 2.1 Identity Providers
 **User login** at MVP is Magic SDK with Google + Apple backends (R71 §2.1, §2.4), covering both creator and buyer authentication uniformly. No password, no email verification.
 
-**Creator channel-ownership verification via YouTube OAuth** is now active at MVP for the self-signup path (§2.8). The creator runs Google OAuth with the `youtube.readonly` scope after Magic login and before sign-cma; the YouTube Data API gates onboarding on `subscriberCount >= 100_000`. Manual founder allowlisting (§2.4) remains as an exception path for special partners / migrations.
+**Creator channel-ownership verification via YouTube OAuth** is active at MVP for the self-signup path (§2.8). The creator runs Google OAuth with the `youtube.readonly` scope after Magic login and before sign-cma; the YouTube Data API gates onboarding on `subscriberCount >= 100_000`. The allowlist (§2.4) is a separate launch-phase gate that composes with the YouTube gate.
 
 ### 2.2 DID Token Verification
 Per request: `magic.token.validate(didToken)` then `magic.token.getIssuer(didToken)` -> resolves `users.magic_did` (R71 §3.3 Magic). Failure short-circuits with `MAGIC_DID_INVALID`.
@@ -92,17 +97,38 @@ Per request: `magic.token.validate(didToken)` then `magic.token.getIssuer(didTok
 | owner | `owners` row exists (created by esign after MJA per INV-2) |
 | moderator | MVP: env-config `FOUNDER_MAGIC_DID` matches; see OI-01 |
 
-A `users` row may carry both creator and owner roles concurrently.
+**MVP single-role exclusivity.** A `users` row carries at most ONE of `creator` or `owner` at MVP. Once sign-cma succeeds and the `creators` row exists, that user cannot complete a first purchase (MJA capture blocked). Once a user signs MJA and the `owners` row exists, they cannot sign-cma. The schema does not enforce this -- two FK-independent tables would allow both -- the constraint is enforced at the role-grant entry points:
 
-### 2.4 Creator Allowlist
-`POST /v1/creator/sign-cma` (R71 §3.7 row 4) rejects with `CREATOR_NOT_ALLOWLISTED` unless `users.email` matches a `creator_allowlist` row. Two population paths:
+- **sign-cma**: rejects with `ROLE_CONFLICT_USER_IS_BUYER` if any `owners` row exists for this user_id.
+- **first-purchase MJA capture**: rejects with `ROLE_CONFLICT_USER_IS_CREATOR` if any `creators` row exists for this user_id.
 
-| Path | Source | Vetting evidence |
-|---|---|---|
-| Primary -- self-signup | Auto-insert on `verifyYoutubeEligibility` pass (§2.8) | `youtube_subscriber_count_at_onboarding >= 100_000` recorded on the creator row |
-| Exception -- founder-curated | Manual insert by moderator (early-launch partners, sub-100k brand collaborations, migration cases) | Out-of-band; `creator_allowlist.note` captures rationale |
+Both checks fire before the respective ESIGN signature is captured, so no orphan Signature rows are created on rejection. **Dual-role support is a planned future feature** -- the schema already permits concurrent rows; only the entry-point guards block it. Removing the guards re-enables dual-role; see OI-04b for design decisions to make at that point.
 
-The row is the canonical authorization gate either way; sign-cma does not re-check YouTube. OI-04 covers row-removal post-CMA.
+### 2.4 Creator Allowlist (launch-phase gate)
+
+Binary toggle controlling whether sign-cma requires an explicitly-listed email. Configured via env vars; no DB table.
+
+| Env var | Role |
+|---|---|
+| `CREATOR_ALLOWLIST_ENABLED` | `true` blocks sign-cma unless the user's email is in `CREATOR_ALLOWLIST_EMAILS`. `false` (default post-launch): the gate is inert and `assertCreatorAllowlisted` is a no-op. |
+| `CREATOR_ALLOWLIST_EMAILS` | Comma-separated email list. Consulted only when `CREATOR_ALLOWLIST_ENABLED=true`. Whitespace and case are normalized before comparison. |
+
+**Composition with the YouTube gate**: sign-cma authorization is the AND of the two independent gates -- allowlist (this section) and YouTube eligibility (§2.8). Either or both can be enabled; sign-cma succeeds when every enabled gate passes:
+
+```
+sign-cma allowed if:
+    (NOT CREATOR_ALLOWLIST_ENABLED OR email in CREATOR_ALLOWLIST_EMAILS)
+    AND
+    (NOT CREATOR_YOUTUBE_GATE_ENABLED OR users.youtube_verified_at IS NOT NULL)
+```
+
+**Launch trajectory**:
+
+| Phase | `CREATOR_ALLOWLIST_ENABLED` | YouTube gate | Net authorization |
+|---|---|---|---|
+| Early closed beta | `true` | off | Email must be in the env-config list; founder vets out-of-band |
+| Public launch | `false` | on | YouTube eligibility (`subscriberCount >= 100k`) is the gate |
+| Future | `false` | off | Open to any Magic-authenticated account |
 
 ### 2.5 Session Endpoints
 - `POST /v1/auth/session` (R71 §3.7 row 1): create or fetch `users` row; return profile.
@@ -111,6 +137,8 @@ The row is the canonical authorization gate either way; sign-cma does not re-che
 
 ### 2.6 Wallet Provisioning Trigger
 On CMA capture (creators) and MJA capture (buyers), invoke Magic's silent wallet provisioning; write the returned `publicAddress` to `users.wallet_address`. Re-auth recovers the same wallet deterministically. The wallet primitive is Registry-owned per INV-4; identity is the trigger only.
+
+**Sequencing constraint for ESIGN.** Per [esign.md](esign.md), each signature is recorded as a Solana transaction co-signed by the user's wallet, with a Memo carrying the `legal_binder_uri` from [legal_binder.md](legal_binder.md). The wallet must therefore be provisioned **before** the first ESIGN capture for any user. At sign-cma this means: provisioning runs inline, the dispatcher waits for `magic.user.getInfo().wallets.solana.publicAddress` to resolve, then builds the CMA Solana tx with that pubkey as the required signer. Subsequent captures (ISA per-image, MJA at first purchase, LICENSE per-image) read `users.wallet_address` directly.
 
 ### 2.6.1 Recovery Key Retrieval
 The wallet's private key is held by Magic (DKMS), never by Epimage -- INV-02 by construction. Users are pointed to a static instructions page at `/recovery-key` ([`src/ui/RecoveryKey.tsx`](../../src/ui/RecoveryKey.tsx)) that explains the flow and renders one button that opens Magic's per-app hosted portal in a new tab (`VITE_MAGIC_PORTAL_URL`, e.g. `https://reveal.magic.link/epimage`). The user re-auths there with the same email they used at Epimage sign-in, then follows Magic's reveal flow. The `magic.link` address bar in the new tab is the trust anchor -- no iframe.
@@ -140,7 +168,7 @@ Onboarding does NOT ask users to download or save the key at signup -- it surfac
 Profile fields are creator-editable post-onboarding with immediate propagation across all of the creator's Gallery surfaces (R62 §3.1).
 
 ### 2.8 YouTube OAuth + Eligibility Gate
-Active at MVP for the self-signup creator path. Runs after Magic email login (§2.5) and before sign-cma (§2.7). On pass, auto-populates `creator_allowlist` (§2.4); on fail, the creator cannot proceed to sign-cma.
+Active at MVP for the self-signup creator path. Runs after Magic email login (§2.5) and before sign-cma (§2.7). On pass, persists `youtube_*` profile fields. The allowlist gate (§2.4) is checked independently; both must pass when both are enabled.
 
 #### 2.8.1 Thresholds
 Two independent gates. The subscriber gate is on at MVP; the activity gate is implemented but feature-flagged off at MVP and activated for production via the go-live checklist.
@@ -164,7 +192,7 @@ Single-shot at onboarding; not re-checked at any later point (OI-07 covers post-
 | 6 | Apply gates in order: presence of `items[0]` (else `YOUTUBE_NO_CHANNEL`); `hiddenSubscriberCount==true` (else `YOUTUBE_HIDDEN_SUBSCRIBERS`); `subscriberCount >= 100_000` (else `YOUTUBE_INSUFFICIENT_SUBSCRIBERS`) |
 | 7 | **If `YOUTUBE_DORMANCY_ENABLED`** -- Server walks the uploads playlist newest-first via `playlistItems.list?playlistId=<uploads>&part=snippet&maxResults=50`, counts items with `publishedAt` inside the lookback window. Stops on min hit (pass) or first out-of-window item (fail -- list is sorted newest-first). Capped at 2 pages (100 items) to bound API spend. If the flag is off, the call is skipped entirely (saves quota + latency) and `recent_upload_count = 0` is returned |
 | 8 | **If `YOUTUBE_DORMANCY_ENABLED`** -- Apply dormancy gate: `recent_upload_count >= 6` (else `YOUTUBE_DORMANT_CHANNEL`) |
-| 9 | On pass: persist `youtube_channel_id`, `youtube_channel_handle` (derived from `snippet.customUrl`, see §2.8.3), `youtube_subscriber_count_at_onboarding`, `youtube_verified_at` on the pending-creator row; insert `creator_allowlist` row keyed by `users.email` with `note='youtube_oauth'` |
+| 9 | On pass: persist `youtube_channel_id`, `youtube_channel_handle` (derived from `snippet.customUrl`, see §2.8.3), `youtube_subscriber_count_at_onboarding`, `youtube_verified_at` on the pending-creator row |
 | 10 | Access token is discarded immediately (no refresh token requested -- single-shot use) |
 
 **Quota cost**: 1 unit for `channels.list` (always); +1 unit per page of `playlistItems.list` (max 2 pages, only when `YOUTUBE_DORMANCY_ENABLED`). At MVP default (dormancy off), 10,000 verifications/day fit in the default quota; with dormancy on, ~3,300 worst-case before a quota bump request to Google.
@@ -181,7 +209,7 @@ One YouTube channel = one Epimage account. Enforced by `User.youtube_channel_id 
 | Scenario | Outcome |
 |---|---|
 | Same channel, different Epimage emails (creator forgot which Magic email they used; tries to re-verify under a new one) | New row blocked; creator must use the original Magic email |
-| Channel-owner dispute (channel ownership transferred on YouTube side, both parties try to claim) | First-write-wins on `channel_id`; resolution path is operational (founder-curated allowlist `note='manual:channel_transfer'` after off-band verification), not automatic |
+| Channel-owner dispute (channel ownership transferred on YouTube side, both parties try to claim) | First-write-wins on `channel_id`; resolution path is operational (founder clears the prior binding off-band; the new owner re-runs YouTube verification), not automatic |
 
 The `channel_id` (not `channel_handle`) is the uniqueness key because the handle can change on YouTube; the `UC`-prefix channel id cannot. Handle changes are tracked separately under OI-08.
 
@@ -191,7 +219,21 @@ The YouTube OAuth does NOT request `userinfo.email` and the platform never reads
 #### 2.8.6 Google OAuth Configuration
 Production Google Cloud project must list `youtube.readonly` (and ONLY that scope) in the OAuth consent screen scopes. The Magic Dedicated Wallet OAuth setup (BYO Auth) and the YouTube OAuth share the same Google Cloud project; configure separate OAuth client IDs to keep redirect-URI lists isolated (Magic's callback vs `/v1/creator/youtube/verify`).
 
-## 3. Non-Functional Requirements
+## 3. Architecture
+
+Two identity providers, composed orthogonally. Magic SDK (R71 §3.2) carries the platform-wide login surface for both creators and buyers via Google + Apple OAuth. YouTube Data API + Google OAuth (`youtube.readonly` scope) carries the creator-eligibility gate (channel ownership + `subscriberCount >= 100_000`). Magic owns "who is this user"; YouTube owns "is this user an eligible creator." A user's Magic identity persists across sessions; YouTube verification is a one-time gate that stamps `users.youtube_verified_at` on success and is never re-run.
+
+Row-existence role model (no RBAC table). Roles are encoded by the presence of rows in dedicated tables: `creators` row = creator; `owners` row = buyer/owner; founder/moderator = env-config DID match (`FOUNDER_MAGIC_DID`). This collapses the auth-check at every route to a foreign-key existence check (sub-ms). MVP single-role exclusivity: a `users` row may carry at most ONE of `creators` or `owners`. Enforcement is at the role-grant entry points (sign-cma / first-purchase MJA), not at the schema -- removing the entry-point guards re-enables dual-role without migration.
+
+Wallet provisioning is silent and idempotent. Magic creates the wallet under the hood on first successful OAuth completion; no per-user click is required. The trigger lives in the session-bootstrap path: post-Magic-login, the server checks `users.wallet_address` and -- if null -- calls Magic admin to derive the wallet address from the DID and persists it. Subsequent logins are no-ops. INV-02 holds because Magic holds the private key on the user's device-bound vault; the platform never sees it.
+
+ESIGN-precedes-role-row ordering (INV-02 in identity scope). A `creators` row exists only AFTER successful CMA signature capture; an `owners` row exists only AFTER successful MJA capture. This means role membership is always backed by a legally-binding consent record. The `esign` subsystem is the only caller authorized to insert into `creators` or `owners`; identity routes never INSERT into those tables directly.
+
+Session is stateless. The DID token (returned by Magic SDK) is verified per-request via `magic.token.validate` + `magic.token.getIssuer`. No server-side session store. Verification is sub-50ms p95 (cached Magic DID issuer keys). Failure short-circuits with `MAGIC_DID_INVALID` before any business logic runs.
+
+YouTube verification, conversely, IS persisted. The OAuth callback receives an access token, calls `channels.list` for the authenticated user's own channels, asserts `subscriberCount >= 100_000`, and writes `users.youtube_channel_id` + `youtube_verified_at`. The access token is discarded after the gate check -- no long-lived YouTube credential is retained. Subsequent channel-data reads (for `creator_snapshot` at mint time) use the platform's separate server-side API key, not the creator's OAuth.
+
+## 4. Non-Functional Requirements
 
 | Property | Specification |
 |---|---|
@@ -200,31 +242,32 @@ Production Google Cloud project must list `youtube.readonly` (and ONLY that scop
 | Audit | every failure logged via Pino with token hash + reason |
 | Wallet provisioning | idempotent; never re-creates an existing wallet |
 
-## 4. Dependencies
+## 5. Dependencies
 
 | Dependency | Role |
 |---|---|
 | `magic-sdk`, `@magic-sdk/admin` (R71 §3.2) | client OAuth + server DID verification |
-| `users`, `creator_allowlist`, `creators`, `owners` (Prisma) | identity + role grants |
+| `users`, `creators`, `owners` (Prisma) | identity + role grants |
+| `CREATOR_ALLOWLIST_ENABLED`, `CREATOR_ALLOWLIST_EMAILS` (env) | launch-phase allowlist gate per §2.4 |
 | esign | role-granting signatures (CMA, MJA) precede role-row creation per INV-2 |
 | storage (TBD) | `creator_headshot` upload + persistence (R62 §3.1) |
 | Google OAuth 2.0 + YouTube Data API v3 (`channels.list`) | §2.8 channel-ownership + subscriber-count gate |
 
-## 5. Open Issues
+## 6. Open Issues
 
 | ID | Issue |
 |---|---|
 | OI-01 | Moderator role storage: env-config `FOUNDER_MAGIC_DID` at MVP. MMP delegation needs a `users.role` column or a `moderators` table; mirrors moderation OI-05 |
 | OI-02 | DID verification cache: every request hits Magic. If latency dominates, a ~60s token-hash cache is the standard mitigation -- not at MVP |
 | OI-03 | Logout: token stays valid until Magic-side expiry; explicit revocation would require Magic's `logoutByPublicAddress` |
-| OI-04 | Allowlist removal post-CMA: existing `creators` row stays valid; intended behavior undecided |
-| OI-05 | RESOLVED 2026-06-03 -- YouTube OAuth + 100k-subscriber gate activated at MVP per §2.8. Manual founder allowlisting moves to exception-path role (§2.4) |
+| OI-04 | Founder updating `CREATOR_ALLOWLIST_EMAILS` after a creator's email is removed: existing `creators` row stays valid (the allowlist is a sign-cma gate, not an ongoing entitlement). Revocation of an existing creator's privileges is a separate concern; intended behavior TBD. |
+| OI-04b | **Dual-role support is a planned future feature.** §2.3 currently blocks the second role grant at MVP. When dual-role lands, the two `ROLE_CONFLICT_*` checks in §1.3 are removed; the schema already supports concurrent rows. Open design choices for that future work: (a) does sign-cma-as-existing-buyer require any extra evidence (e.g. a separate "intent to create" attestation)?; (b) does first-purchase-as-existing-creator skip the buyer-onboarding email since the same person already received CMA onboarding?; (c) UI changes to clearly surface both role statuses on the profile page. |
 | OI-06 | R71 §3.6 `creators` schema does not yet carry `creator_headshot` or `creator_bio` columns (R62 §3.1 specifies them as required MVP fields). Treated as MVP scope here per the UI-follows-R62 decision; pending R71 schema propagation. `creator_channel_url` is derived at render time from `youtube_channel_handle` and needs no separate column. R71 §3.6 schema also pending propagation for the §2.8 fields: `youtube_channel_id`, `youtube_subscriber_count_at_onboarding`, `youtube_verified_at` |
 | OI-07 | Post-onboarding subscriber-count drift: current behavior is no effect -- a creator who falls below 100k retains full privileges. If product later wants re-verification (quarterly, before each new listing, etc.), the change requires storing the refresh token (§2.8.4) and adding a re-check cron + revocation flow for live listings. Out of scope at MVP per AC-12 |
 | OI-08 | Handle-change handling: YouTube allows channel handle changes. We bind on `youtube_channel_id` (durable), but `youtube_channel_handle` is the display value rendered everywhere (R62 §4.3) and the `/c/<handle>` URL slug. If the upstream handle changes, our cached value goes stale: image-page links break, `/c/<old-handle>` 404s, the on-chain deed `name` field (`epima.ge/<image_id>` -- independent, unaffected) and the per-deed `external_url` (`epimage.com/<image_id>` -- independent, unaffected) are fine. Reconciliation path is TBD. Manual creator-edit at MVP is acceptable but not implemented (handle is currently read-only post-onboarding per §2.7) |
 | OI-09 | Multi-channel creators: a Google account can own multiple YouTube channels. We currently take `items[0]` (the primary channel). Behavior when the OAuth-connected Google account has multiple channels is undefined; channel-picker UI is the natural fix but not at MVP |
 
-## 6. Cross-References
+## 7. Cross-References
 
 | Doc | Purpose |
 |---|---|
@@ -233,7 +276,7 @@ Production Google Cloud project must list `youtube.readonly` (and ONLY that scop
 | R71 §2.1, §2.3, §2.4 | onboarding flows |
 | R71 §3.2 (Magic libraries) | magic-sdk + admin SDK |
 | R71 §3.3 Magic | DID verification mechanics |
-| R71 §3.6 | `users` / `creator_allowlist` / `creators` / `owners` tables |
+| R71 §3.6 | `users` / `creators` / `owners` tables |
 | R71 §3.7 rows 1-3 | session endpoints |
 | R71 §3.7 row 4 | sign-cma endpoint (creator profile capture orchestration) |
 | R62 §3.1 | creator-account display fields (`creator_headshot`, `creator_bio`, `creator_channel_url`) -- canonical at MVP per UI-follows-R62 decision |
@@ -244,4 +287,4 @@ Production Google Cloud project must list `youtube.readonly` (and ONLY that scop
 | Constitution INV-02 | platform never holds buyer private keys -- enforced by §2.6.1 (Magic-held DKMS, hosted reveal flow) |
 
 ---
-*Last Updated: 26/06/07 18:15*
+*Last Updated: 26/06/12 18:00*
