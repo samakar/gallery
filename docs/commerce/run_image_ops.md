@@ -1,6 +1,6 @@
 # Run Image Ops (Commerce)
 
-Async build orchestrator. Owns `POST /v1/purchases/:id/start-build` (per [ADR-0001](../adr/adr_0001_buyer_triggered_build.md)) and the `paid → building → minting` purchase-state transitions. Coordinates `metadata.captureMonogram` → Registry's `arweave_master` → `image_gen.generateShareCopy` → Registry's `crossmint_dispatch`. Triggered by buyer's monogram POST, **not** by Stripe webhook. Crash recovery via Prisma row-state on process startup.
+Async build orchestrator. Owns `POST /v1/purchases/:id/start-build` (per [ADR-0001](../adr/adr_0001_buyer_triggered_build.md)) and the **full** `paid → building → minting → confirmed | failed` purchase-state machine (mint now synchronous per [ADR-0008](../adr/adr_0008_self_mint_bubblegum_v2.md)). Coordinates `metadata.captureMonogram` → Registry's `arweave_master` → `image_gen.generateShareCopy` → Registry's `cnft_dispatch` → `post_mint.applyMintSucceeded`. Triggered by buyer's monogram POST, **not** by Stripe webhook. Crash recovery via Prisma row-state on process startup.
 
 ## 1. Interface
 
@@ -48,7 +48,7 @@ Internal pipeline failures surface to `purchases.failure_reason` and trigger `pa
 | Pre (startBuild) | `purchases.status='paid'`; `monogram_text` non-empty; PLATFORM_DEK + STRIPE_SECRET_KEY etc. all set (caller modules' concerns) |
 | Pre (recoverStalled) | none -- runs at process startup |
 | Post (startBuild success) | `purchases.monogram_text` persisted (captureMonogram); `purchases.status='building'`; async pipeline spawned in-process; 202 returned |
-| Post (pipeline success) | Registry's crossmint_dispatch fires; `purchases.status='minting'`; crossmint_webhook owns terminal transitions |
+| Post (pipeline success) | Registry's cnft_dispatch fires synchronously; `purchases.status` advances `minting → confirmed` after `post_mint.applyMintSucceeded` returns |
 | Post (pipeline failure) | `purchases.status='failed'`; `failure_reason='<STEP>_FAILED:<detail>'`; `payments.refundPurchase` called inline |
 | Post (recovery) | Each stalled row's pipeline re-spawned; per-step idempotency prevents duplicate work |
 
@@ -61,7 +61,7 @@ Internal pipeline failures surface to `purchases.failure_reason` and trigger `pa
 | AC-03 | empty monogram | `startBuild(purchase_id, "")` | `MONOGRAM_REQUIRED` |
 | AC-04 | arweave terminal failure | pipeline run | `status='failed'`; `failure_reason='ARWEAVE_UPLOAD_FAILED'`; payments.refundPurchase called |
 | AC-05 | startup recovery; stuck `paid` > 5 min | `recoverStalled()` | row re-spawned through full pipeline; idempotent per-step checks prevent re-encrypt / re-upload |
-| AC-06 | mint dispatched | pipeline reaches step (e) | `purchases.status='minting'`; control passes to crossmint_webhook |
+| AC-06 | mint dispatched | pipeline reaches step (e) | `purchases.status='minting'`; cnft_dispatch returns synchronously and runImageOps advances to `confirmed` via post_mint.applyMintSucceeded |
 
 ## 2. Functional Requirements
 
@@ -80,13 +80,13 @@ Internal pipeline failures surface to `purchases.failure_reason` and trigger `pa
 | (b) | Build on-Arweave Master | Registry: `arweave_master.buildAndUpload(image_id, buyer_wallet_pubkey)` → `{ arweave_uri, sha256, enc_final }` (calls image_gen.decryptOriginal internally) |
 | (c) | Build Share Copy | `image_gen.generateShareCopy(image_id, owner_ordinal=1, monogram_text)` → `{ public_id }` |
 | (d) | Transition state | Conditional UPDATE `purchases.status='minting' WHERE id=? AND status='building'` |
-| (e) | Dispatch mint | Registry: `crossmint_dispatch({ image_id, buyer_wallet_pubkey, enc_final, sha256, license_signing_event_id })` |
-| (f) | Exit | Control handed off to Registry's `crossmint_webhook` which writes terminal state (`minting → confirmed | failed`) |
+| (e) | Dispatch mint (synchronous) | Registry: `cnft_dispatch({ image_id, buyer_wallet_pubkey, enc_final, sha256, ... }) -> { asset_id }`. Throws on failure. |
+| (f) | Apply mint outcome | On success: `post_mint.applyMintSucceeded` inserts the `deeds` row and advances `minting → confirmed`. On thrown failure: catch → `payments.refundPurchase` → advance to `failed`. |
 
 ### 2.3 Retry Policy (R71 §3.9)
 - Cloudinary calls inside `image_gen.generateShareCopy` retry 3x with 1/4/16s backoff per image_gen §2.7.
 - ArDrive Turbo retries internal to `@ardrive/turbo-sdk`.
-- Crossmint dispatch retries handled by the Crossmint SDK / Registry module.
+- Self-mint retry semantics handled inside `cnft_dispatch` (RPC retries with backoff for transient network failures; deterministic asset_id derivation via `findLeafAssetIdPda` means a retried mint resolves to the same address).
 - runImageOps itself does **not** add an outer retry layer -- each external call's retry policy is owned by its module.
 
 ### 2.4 Terminal Failure
@@ -104,12 +104,12 @@ On process startup, `recoverStalled()` runs once:
 3. Per-step idempotency makes re-runs safe:
    - **arweave_master**: skip if `images.arweave_uri` populated (returns `MASTER_ALREADY_BUILT`)
    - **generateShareCopy**: Cloudinary `public_id` is deterministic; re-call is byte-identical
-   - **crossmint_dispatch**: Crossmint idempotency keyed on `purchases.id` carried in mint metadata
+   - **cnft_dispatch**: idempotent on `purchases.id`; deterministic asset_id derivation means re-dispatching for the same purchase resolves to the same address (no double-mint)
 
 Rows in `'paid'` with no recent updates indicate the buyer POSTed start-build but the process crashed mid-flight; recovery resumes from step (b).
 
 ### 2.6 Mint Outcome Handoff
-runImageOps does **not** handle `mint.succeeded` / `mint.failed`. Registry's `crossmint_webhook` owns:
+Under [ADR-0008](../adr/adr_0008_self_mint_bubblegum_v2.md) the mint is **synchronous** -- runImageOps catches the return value (success) or thrown exception (failure) and handles both inline. There is no Crossmint webhook. runImageOps invokes `post_mint.applyMintSucceeded` to:
 - `mint.succeeded` → write `deeds` row + `metadata.onMintSucceeded` → `purchases.status='confirmed'`
 - `mint.failed` → `purchases.status='failed'`; `payments.refundPurchase`
 
@@ -124,7 +124,7 @@ Per R71 §3.9, runImageOps is an async fn spawned by the startBuild handler with
 No separate `jobs` table at MVP. Crash recovery reads `purchases.status` + `updated_at`. State transitions are conditional UPDATEs guarded by expected prior state -- duplicate spawns no-op.
 
 ### 3.3 The Only Commerce → Registry Caller
-runImageOps is the only Commerce module that calls Registry directly (arweave_master at step b; crossmint_dispatch at step e). All other Commerce modules stay Web2-bounded.
+runImageOps is the only Commerce module that calls Registry directly (arweave_master at step b; cnft_dispatch at step e; post_mint at step f). All other Commerce modules stay Web2-bounded.
 
 ### 3.4 Endpoint Co-Ownership Note
 runImageOps owns `POST /v1/purchases/:id/start-build`; payments owns `POST /v1/webhooks/stripe`, `POST /v1/purchases`. Both touch `purchases` but the route ownership is clean per ADRs.
@@ -148,7 +148,7 @@ runImageOps owns `POST /v1/purchases/:id/start-build`; payments owns `POST /v1/w
 | image_gen | `generateShareCopy` (step c) + `decryptOriginal` (called by arweave_master internally) |
 | payments | `refundPurchase` callback on terminal failure |
 | Registry: `arweave_master` (TBD) | step (b) |
-| Registry: `crossmint_dispatch` (TBD) | step (e) |
+| Registry: `cnft_dispatch` | step (e) -- synchronous self-mint per ADR-0008 |
 
 ## 6. Open Issues
 
@@ -166,17 +166,17 @@ runImageOps owns `POST /v1/purchases/:id/start-build`; payments owns `POST /v1/w
 |---|---|
 | **ADR-0001** | Build trigger: buyer POST drives this module |
 | **ADR-0002** | Monogram persisted via captureMonogram before spawn |
-| metadata.md | captureMonogram (step 2); onMintSucceeded (post-mint, called by Registry crossmint_webhook) |
+| metadata.md | captureMonogram (step 2); onMintSucceeded (post-mint, called inline by post_mint.applyMintSucceeded) |
 | image_gen.md | generateShareCopy (step c); decryptOriginal (called by arweave_master internally) |
 | payments.md | refundPurchase callback on terminal failure; webhook is upstream (transitions to `paid`) |
 | Registry: arweave_master (TBD) | step (b) -- decrypt + re-encrypt + enc_final + ArDrive upload |
-| Registry: crossmint_dispatch (TBD) | step (e) -- mint deed |
-| Registry: crossmint_webhook (TBD) | minting → confirmed/failed terminal handoff |
-| purchase_wsd.md | steps 10-13 of Card 4 are owned by this module |
+| Registry: cnft_dispatch | step (e) -- mint deed |
+| Registry: post_mint (applyMintSucceeded) | step (f) -- inline success path; `deeds` insert + `minting → confirmed` |
+| [workflows/purchase_wsd.md](../workflows/purchase_wsd.md) | steps 10-13 of Card 4 are owned by this module |
 | R71 §2.4 steps 11-14 | authoritative reference for the pipeline shape |
 | R71 §3.7 | start-build endpoint NOT in R71 §3.7 (diverged per ADR-0001) |
 | R71 §3.8 | purchase state machine |
 | R71 §3.9 | async pipeline + retry + crash recovery |
 
 ---
-*Last Updated: 05/29/26 16:30*
+*Last Updated: 26/06/10 15:00*

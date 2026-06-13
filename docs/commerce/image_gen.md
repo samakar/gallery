@@ -175,6 +175,36 @@ Each Cloudinary call retries 3 times with exponential backoff (1s, 4s, 16s). All
 ### 2.8 Single Transformation per Variant
 Each variant is one Cloudinary request: resize / crop first, overlays composited second, quality / format encoded last (R71 §3.5). No intermediate chained encoding -- variant encoded exactly once.
 
+### 2.9 Card-1 Encryption (Authoritative Master Storage)
+
+Card 1 (`/v1/images`) is the authoritative point at which the upload buffer is encrypted and persisted. After Cloudinary upload succeeds (for the listing/preview/share variants), the route immediately:
+
+1. Encrypts the upload buffer with a per-image `DEK_image` via `cert/crypto.encryptMaster`.
+2. Writes the AES-256-GCM ciphertext to `EncryptedMasterStore` (see [registry/arweave_master.md §2.7](../registry/arweave_master.md)). MVP store implementation is local FS at `data/encrypted_masters/<image_id>.bin`.
+3. Persists the wrapped DEK on `images.dek_wrapped` at row creation.
+
+The encrypted Master in the store is the source for Card 5's Arweave upload -- not a Cloudinary re-fetch. This preserves byte-identity end-to-end (the bytes the SHA-256 anchors at Card 1 are the bytes that get decrypted from Arweave post-cessation). The historic Cloudinary-round-trip metadata-stripping drift is eliminated.
+
+**No backup at MVP** per explicit scope decision: if the FS loses an entry pre-sale, the creator re-uploads. Atomic write (write-temp + rename) protects against partial-write corruption from crashes, but not against disk loss. Post-MVP swap to S3/B2/R2 raises durability to 11 9s without code changes (interface-abstracted).
+
+### 2.10 Cloudinary Access Mode (Option A: `type: 'private'` + signed URLs)
+
+The per-image Master upload (`uploadOriginal` at `public_id = <image_id>`) sets `type: 'private'`. Cloudinary refuses unsigned requests for the Master OR any transformation of it -- direct CDN-URL access bypassing the platform server returns 404. Every variant URL the server builds (Listing Preview, Share Copy, Thumbnail, Download, Original) carries:
+
+| Field | Value | Why |
+|---|---|---|
+| `type` | `'private'` | Matches the upload's access mode. Cloudinary checks both source + transformation requests against this. |
+| `sign_url` | `true` | SDK auto-generates an HMAC signature from `CLOUDINARY_URL`'s api_secret over the URL components. |
+| `expires_at` | `Math.floor(Date.now()/1000) + 60` | TTL = **60 seconds**. The signed URL never reaches a browser -- the server builds it, uses it in a single upstream `fetch` inside `/i/:imageId` proxy, then discards it. 60s gives generous margin for network slop and platform-vs-Cloudinary clock skew, but caps the value of a leaked URL (log scrape, error payload, etc.) to ~one minute of exposure. |
+
+The defense layer is **Cloudinary-edge enforcement**: even if an attacker learns the `cloud_name` (it appears in delivered URLs) and the `image_id` (it appears in our own URLs), they cannot fetch the bytes without a valid signature -- and signatures live only in server memory for the duration of one upstream fetch.
+
+**Creator headshots** (`uploadHeadshot` / `buildHeadshotUrl`) intentionally stay at the default `type: 'upload'` (public) since they're meant to be browseable as creator-profile branding. The split is per-asset-class, not global.
+
+**CDN-cache trade-off**: every server request produces a fresh signature, so Cloudinary's edge cache keys (which include the signature) are bypassed -- the upstream origin is hit each time. At MVP scale this is fine; if listing-page hot paths ever cost real egress, switch to a rotated-daily signature shared across requests (~24h TTL, server-rotates at boot). Keep TTL=60s at MVP.
+
+**Defense-in-depth limit**: the bytes on Cloudinary are still **cleartext** -- this option only adds a CDN-level access gate. The TODO in §2.1 (encrypt-at-upload, upload only derived variants) is the layered defense on top: bytes-on-Cloudinary become ciphertext, and even Cloudinary access misconfiguration cannot leak the Master.
+
 ## 3. Architecture
 
 ### 3.1 Two Phases
@@ -253,4 +283,4 @@ This module is the only place that talks to Cloudinary. Callers consume the retu
 | docs/ui_design.md | Render-side surfaces consuming these variants |
 
 ---
-*Last Updated: 05/31/26 20:55*
+*Last Updated: 26/06/10 17:00*

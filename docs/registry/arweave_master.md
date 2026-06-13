@@ -1,8 +1,10 @@
 # Arweave Master (Registry)
 
-On-Arweave Master encryption + ArDrive Turbo upload. Fetches the Master (original full-resolution upload bytes) from Cloudinary's no-transformation delivery URL, encrypts with the per-image `DEK_image` (single-DEK per R65 §3.14), reads the persisted `images.sha256` (populated at certify time over the upload buffer) and `images.phash` (Card 1 uniqueness gate per [ADR-0005](../adr/adr_0005_phash_in_deed_and_uniqueness_gate.md)) -- both used for deed metadata anchoring -- and uploads the single-layer AES-256-GCM ciphertext to Arweave via ArDrive Turbo. The doubly-nested `enc_final = encrypt(encrypt(DEK_image, owner_wallet_pubkey), platform_DEK)` per R62 §2.3 is constructed by [`run_image_ops`](../commerce/run_image_ops.md) and written to on-chain deed metadata by [`cnft_dispatch`](cnft_dispatch.md). Persists `arweave_uri` + `sha256` to `images`. Called by Commerce's `run_image_ops` at step (b).
+On-Arweave Master upload via ArDrive Turbo. Reads the ZIP-AES-256 archive from `EncryptedMasterStore` (written at Card 1 by [server.ts](../../src/app/api/server.ts) `/v1/images` per D-21) and uploads it as-is to Arweave -- **no decrypt, no re-encrypt, no repackaging**. Arweave bytes are byte-identical to FS bytes. The doubly-nested `enc_final = encrypt(encrypt(DEK_image, owner_wallet_pubkey), platform_DEK)` per R62 §2.3 is constructed by [`run_image_ops`](../commerce/run_image_ops.md) and written to on-chain deed metadata by [`cnft_dispatch`](cnft_dispatch.md). Persists `arweave_uri` + `sha256` to `images`. Called by Commerce's `run_image_ops` at step (b).
 
-> **Implementation status (2026-06-07): R62 §1.5 architecture preserved + D-19 packaging.** The Arweave-bound payload is a single-layer ZIP-AES-256 archive (`<image_id>.zip` containing `<image_id>.jpg`, password = base64(DEK_image)) per [D-19](../divergences.md#d-19-arweave-master-packaging-zip-aes-256--platform-proxy-for-friendly-filename). One DEK_image per image is still the only key; the on-chain `enc_final` still does the doubly-nested wrap per R62 §1.5/§2.3. Mode shifts from GCM to ZIP-native AES-256-CBC for native-tool UX. The buyer-facing deed UI displays the raw `arweave.net/<tx_id>` URL but hyperlinks to the platform proxy `GET /a/:imageId` which streams the bytes with `Content-Disposition: attachment; filename="<image_id>.zip"`. Local-disk persisted ciphertext stays raw AES-256-GCM (R62 §2.3 exact) for `/download-master`. ADR-0010's nested ZIP variant was [superseded](../adr/adr_0010_nested_zip_master_encryption.md#status) the same day; D-19's single-layer ZIP preserves the UX win without ADR-0010's resale-rekey problem.
+After Arweave gateway readiness is confirmed (`arweave_ready_at` stamped by [arweave_ready_sweeper](../../src/app/workers/arweave_ready_sweeper.ts)), the store entry is deleted. Arweave becomes the authoritative encrypted-Master copy for sold images. `/download-master` no longer streams Master bytes -- it returns a JSON payload `{ archive_url, arweave_uri, password, filename_hint, custody_state }` for the owner to fetch the ZIP from Arweave + extract client-side.
+
+> **Implementation status (2026-06-11): D-21 -- ZIP-at-Card-1 + Card-5 pass-through + password-reveal /download-master.** Card 1 (`/v1/images`) builds the single-layer ZIP-AES-256 archive (`<image_id>.jpg` inside, password = `base64(DEK_image)`) and writes it to `EncryptedMasterStore` at `data/encrypted_masters/<image_id>.zip`. Card 5 (this module) lifts those bytes to Arweave unchanged. `/download-master` returns the password + Arweave URL; the server never decrypts. D-19's Card-5-decrypt-and-rezip is **superseded** by D-21. After Arweave readiness is confirmed, the store entry is deleted -- Arweave becomes the authoritative copy. ZIP packaging preserves the native-tool extract UX (WinZip / macOS Archive Utility / iOS Files / Linux unzip 6.0+). ADR-0010's nested ZIP variant was [superseded 2026-06-06](../adr/adr_0010_nested_zip_master_encryption.md#status); D-19's Card-5-rezip variant is superseded 2026-06-11. Resale (post-MVP) will need server-side ZIP extraction to regenerate Share Copies per new owner -- contract point at [src/cert/zip.ts `extractFromZipAes256`](../../src/cert/zip.ts) (stubbed).
 
 ## 1. Interface
 
@@ -13,6 +15,10 @@ On-Arweave Master encryption + ArDrive Turbo upload. Fetches the Master (origina
 |---|---|---|
 | image_id | string(5) | |
 | buyer_wallet_pubkey | string | Solana base58; inner layer of `enc_final` |
+| title | string | Embedded in the Arweave-tag metadata (App-Name=Epimage flow) and the no-credit manifest fallback. |
+| creator_display_name | string | Same -- metadata only. |
+
+Note: `master_url` is no longer an input. The encrypted Master is read from `EncryptedMasterStore` per §2.7 instead of fetched from a Cloudinary URL.
 
 ### 1.2 Outputs
 
@@ -36,9 +42,10 @@ On-Arweave Master encryption + ArDrive Turbo upload. Fetches the Master (origina
 
 | Type | Condition |
 |---|---|
-| Pre | `images.dek_wrapped` populated; `images.phash` populated (Card 1 uniqueness gate); PLATFORM_DEK set; ArDrive Turbo FIAT-credit topped up |
+| Pre | encrypted Master present in `EncryptedMasterStore` (Card 1); `images.sha256` + `images.phash` populated (Card 1); ArDrive Turbo FIAT-credit topped up. (`images.dek_wrapped` is set at Card 1 too but this module does not read it -- it's used by `/download-master`.) |
 | Post (build) | `images.arweave_uri` populated; `images.sha256` populated; `images.phash` preserved (read-through, never overwritten); byte-immutable for deed lifetime per R62 §7.4 |
-| Post (idempotent) | already-built returns existing values; no re-encrypt, no re-upload |
+| Post (idempotent) | already-built returns existing values; no re-decrypt, no re-upload |
+| Post (gateway ready) | `images.arweave_ready_at` stamped by the sweeper; `EncryptedMasterStore` entry deleted (Arweave becomes authoritative) |
 
 ### 1.5 Acceptance Criteria
 
@@ -51,14 +58,15 @@ On-Arweave Master encryption + ArDrive Turbo upload. Fetches the Master (origina
 
 ## 2. Functional Requirements
 
-### 2.1 Fetch Master + Hash + phash read-through
-1. Fetch the Master bytes from Cloudinary's no-transformation delivery URL (`buildOriginalUrl(image_id)` -- returns the original full-resolution unwatermarked upload, NOT the listing-preview variant). These are the bytes that get encrypted to the local disk + nested-ZIP'd to Arweave + delivered to the buyer via /v1/deeds/:imageId/download-master.
-2. Read `images.sha256` (populated at certify time over the upload buffer in [server.ts](../../src/app/api/server.ts) `/v1/creator/certify-image`). This becomes `deed.variant_hashes["M+00"].sha256`. Recompute over the Cloudinary-served Master bytes only on the legacy path (rows with sha256=null). Buyer-visible "SHA-256 (M+00)" pre-sale matches what the deed anchors post-sale. Note: the certify-time hash is over the EXACT upload buffer; the mint-time recompute hashes Cloudinary-served bytes, which can differ if Cloudinary strips EXIF/metadata -- in practice `images.sha256` (upload-buffer) takes precedence via read-through.
-3. Read `images.phash` (already populated at Card 1 by [cert/image_uniqueness](../cert/image_uniqueness.md) per [ADR-0005](../adr/adr_0005_phash_in_deed_and_uniqueness_gate.md)). This becomes `deed.variant_hashes["M+00"].phash`. **No recomputation**: the upload-time phash is the deed anchor (single source of truth -- pixel-equivalent under INV-04 means the canonical-Master phash equals the upload-buffer phash; explicit read-through guarantees this without re-running sharp-phash).
+### 2.1 Read Encrypted Master from Store (no decrypt)
+1. Read the ZIP-AES-256 bytes from `EncryptedMasterStore.read(image_id)` (populated at Card 1 by [server.ts](../../src/app/api/server.ts) `/v1/images`). If absent, return `ARWEAVE_UPLOAD_FAILED` -- this indicates Card 1 didn't run or the store entry was prematurely deleted.
+2. Do **not** decrypt. The Arweave-bound bytes are the same ZIP bytes on FS; the module is a pass-through to permanent storage.
 
-### 2.2 Re-encrypt with Same DEK
-1. Read `images.dek_wrapped` → unwrap with `process.env.PLATFORM_DEK` → `DEK_image`.
-2. AES-256-GCM(`DEK_image`, plaintext) → ciphertext + auth tag (single-DEK architecture per R65 §3.14 -- same DEK as the operational Original).
+Rationale: `dek_wrapped` is preserved on `images` for `/download-master` to use at password-derive time; this module never needs it. Arweave bytes match FS bytes match the ZIP archive of the upload buffer the on-chain SHA-256 anchors. End-to-end byte-identity preserved without any in-memory key-handling here.
+
+### 2.2 Hash + phash read-through
+1. Read `images.sha256` (populated at Card 1 over the upload buffer -- the cleartext Master). This becomes `deed.variant_hashes["M+00"].sha256`. Recompute on the legacy path runs on the FS ZIP bytes (not cleartext, since this module no longer extracts) -- different from the upload-buffer hash; new rows always have `images.sha256` populated to avoid that drift.
+2. Read `images.phash` (populated at Card 1 by [cert/image_uniqueness](../cert/image_uniqueness.md) per [ADR-0005](../adr/adr_0005_phash_in_deed_and_uniqueness_gate.md)). This becomes `deed.variant_hashes["M+00"].phash`. **No recomputation**: upload-time phash is the deed anchor.
 
 ### 2.3 Construct enc_final (R62 §2.3)
 | Layer | Operation |
@@ -78,18 +86,43 @@ On-Arweave Master encryption + ArDrive Turbo upload. Fetches the Master (origina
 If `images.arweave_uri` populated → return `MASTER_ALREADY_BUILT` (no upload). Per R71 §3.9, run_image_ops crash recovery re-spawns; this guard makes recovery safe.
 
 ### 2.6 INV-04 Compliance
-Original at `/var/originals/<image-id>.enc` is **never modified** by this module. The on-Arweave Master is a separate ciphertext derived from the same plaintext.
+The encrypted Master in the store is **never modified** by this module. It's read, decrypted in-memory, ZIP-packaged for Arweave, and deleted post-readiness. The decrypted bytes are byte-identical to the upload buffer, preserving pixel integrity end-to-end.
+
+### 2.7 EncryptedMasterStore (Card 1 write → Card 5 read → post-ready delete)
+
+The store is an interface at [src/registry/arweave_master.ts](../../src/registry/arweave_master.ts):
+
+```ts
+export interface EncryptedMasterStore {
+    read(image_id: string): Promise<Buffer | null>;
+    write(image_id: string, ciphertext: Buffer): Promise<void>;
+    delete(image_id: string): Promise<void>;
+    exists(image_id: string): Promise<boolean>;
+}
+```
+
+| Phase | Caller | Operation |
+|---|---|---|
+| Card 1 (creator upload) | server.ts `/v1/images` | `write(image_id, ciphertext)` after Cloudinary upload succeeds + before DB row creation. Atomic write (write-temp + rename) protects against partial-write corruption from crashes. |
+| Pre-sale (operational) | server.ts `/v1/deeds/:imageId/download-master` | `read(image_id)` -- still the primary source while pre-sale (sweeper hasn't deleted yet) |
+| Card 5 (post-sale build) | this module's `buildAndUpload` | `read(image_id)` to decrypt + ZIP-package for Arweave |
+| Post-Arweave-ready | [arweave_ready_sweeper](../../src/app/workers/arweave_ready_sweeper.ts) | `delete(image_id)` once `arweave_ready_at` is stamped -- Arweave is authoritative |
+| Takedown | [src/cert/takedown.ts](../../src/cert/takedown.ts) `recordTakedown` | `delete(image_id)` as a side effect (no need to retain bytes for content the platform will not serve) |
+
+**MVP implementation**: `fsEncryptedMasterStore` -- writes/reads/deletes files at `data/encrypted_masters/<image_id>.bin`. Path overridable via `ENCRYPTED_MASTER_DIR` env var. No backup at MVP per explicit scope decision; if the FS loses an entry pre-sale, the creator re-uploads.
+
+**Post-MVP**: swap the `encryptedMasterStore` export to an `s3EncryptedMasterStore` (new file implementing the same interface against S3/B2/R2). Call sites don't change. Durability rises to 11 9s; FS loses its "single point of failure" status; multi-instance scale-out becomes possible.
 
 ## 3. Architecture
 
 ### 3.1 Single-DEK per R65 §3.14
 Same `DEK_image` for Original (operational) and Master (archival). Trade-off: simpler than per-variant DEKs while preserving per-owner exclusivity via the wallet-inner layer of `enc_final`.
 
-### 3.2 Reads via Commerce
-The only Registry → Commerce read: `image_gen.decryptOriginal`. Documented in image_gen as "the only Commerce → Registry export".
+### 3.2 Encryption Happens at Card 1, Not Card 5
+Historically, encryption + `dek_wrapped` population happened at Card 5 in this module. As of 2026-06-10, Card 1 (`/v1/images`) owns encryption: it writes the ciphertext to the store and populates `images.dek_wrapped`. This module reads from the store rather than fetching cleartext from Cloudinary -- fixing the SHA-256 drift caused by Cloudinary metadata normalization.
 
-### 3.3 Plaintext In-Flight Only
-Decrypted plaintext is consumed by re-encryption + sha256; never persisted to disk; discarded after upload.
+### 3.3 No Plaintext In-Flight
+This module never holds cleartext Master bytes -- it reads ciphertext from the store and uploads ciphertext to Arweave. The only module that ever decrypts the Master is `/download-master` (server.ts) when serving an authenticated owner. Reducing key-handling surface area was a deliberate goal of the 2026-06-10 simplification.
 
 ## 4. Non-Functional Requirements
 
@@ -105,12 +138,13 @@ Decrypted plaintext is consumed by re-encryption + sha256; never persisted to di
 | Dependency | Role |
 |---|---|
 | `@ardrive/turbo-sdk` (R71 §3.2) | Arweave upload (FIAT-funded) |
-| `image_gen.decryptOriginal` (Commerce) | Source plaintext (cross-function read) |
-| `node:crypto` | AES-256-GCM + asymmetric encrypt for inner layer |
-| `images` table (Prisma) | `dek_wrapped` + `phash` read; `arweave_uri` / `sha256` write |
+| `EncryptedMasterStore` (this module) | Read source (set at Card 1); pass-through to Arweave |
+| `images` table (Prisma) | `sha256` + `phash` read (set at Card 1); `arweave_uri` write. `dek_wrapped` is not read here -- it's owned by Card 1 (write) and `/download-master` (read). |
 | `cert/image_uniqueness` (predecessor at Card 1) | populates `images.phash` per [ADR-0005](../adr/adr_0005_phash_in_deed_and_uniqueness_gate.md) |
+| `app/workers/arweave_ready_sweeper` | Deletes store entry post-readiness |
 | `process.env.PLATFORM_DEK` | envelope key |
 | `process.env.ARDRIVE_TURBO_TOKEN` | upload credential |
+| `process.env.ENCRYPTED_MASTER_DIR` (optional) | overrides `data/encrypted_masters` |
 
 ## 6. Open Issues
 
@@ -142,4 +176,4 @@ Decrypted plaintext is consumed by re-encryption + sha256; never persisted to di
 | Constitution INV-08 | C2PA append-only (N/A at MVP) |
 
 ---
-*Last Updated: 26/06/07 02:30*
+*Last Updated: 26/06/11 10:30*

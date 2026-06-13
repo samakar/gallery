@@ -23,8 +23,7 @@ import exifr from "exifr";
 // R71 §3.7 error conventions.
 export type ImageSpecErrorCode =
     | "INGESTION_FORMAT_NOT_JPEG"
-    | "INGESTION_WINDOW_FLOOR_LONG_EDGE"
-    | "INGESTION_WINDOW_FLOOR_SHORT_EDGE"
+    | "INGESTION_WINDOW_FLOOR"
     | "INGESTION_WINDOW_CEILING_MEGAPIXELS"
     | "INGESTION_ASPECT_OUT_OF_BAND"
     | "INGESTION_QUALITY_BELOW_Q90";
@@ -41,7 +40,6 @@ export type ImageSpecResult =
     | { ok: false; error_code: ImageSpecErrorCode; message: string };
 
 const LONG_EDGE_MIN_PX = 4200;
-const SHORT_EDGE_MIN_PX = 3300;
 const MAX_MEGAPIXELS = 38;
 const ASPECT_MIN = 1;
 const ASPECT_MAX = 2;
@@ -83,12 +81,8 @@ export async function validateClientSide(file: File): Promise<ImageSpecResult> {
     const longEdge = Math.max(width, height);
     const shortEdge = Math.min(width, height);
     if (longEdge < LONG_EDGE_MIN_PX) {
-        return reject("INGESTION_WINDOW_FLOOR_LONG_EDGE",
+        return reject("INGESTION_WINDOW_FLOOR",
             `Long edge ${longEdge} px below floor ${LONG_EDGE_MIN_PX} px.`);
-    }
-    if (shortEdge < SHORT_EDGE_MIN_PX) {
-        return reject("INGESTION_WINDOW_FLOOR_SHORT_EDGE",
-            `Short edge ${shortEdge} px below floor ${SHORT_EDGE_MIN_PX} px.`);
     }
     const megapixels = (width * height) / 1_000_000;
     if (megapixels > MAX_MEGAPIXELS) {
@@ -138,12 +132,8 @@ async function validateWindow(input: File | Uint8Array): Promise<ImageSpecResult
     const shortEdge = Math.min(width, height);
 
     if (longEdge < LONG_EDGE_MIN_PX) {
-        return reject("INGESTION_WINDOW_FLOOR_LONG_EDGE",
+        return reject("INGESTION_WINDOW_FLOOR",
             `Long edge ${longEdge} px below floor ${LONG_EDGE_MIN_PX} px.`);
-    }
-    if (shortEdge < SHORT_EDGE_MIN_PX) {
-        return reject("INGESTION_WINDOW_FLOOR_SHORT_EDGE",
-            `Short edge ${shortEdge} px below floor ${SHORT_EDGE_MIN_PX} px.`);
     }
 
     const megapixels = (width * height) / 1_000_000;

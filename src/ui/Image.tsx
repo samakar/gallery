@@ -9,6 +9,8 @@
 // (metadata can be prepared while moderation is still pending).
 
 import { useCallback, useEffect, useRef, useState } from 'react';
+import ReactMarkdown from 'react-markdown';
+import remarkGfm from 'remark-gfm';
 import { useParams, useNavigate, useSearchParams, Link, type NavigateFunction } from 'react-router-dom';
 import { api, getActiveRole } from './api';
 import { getDidToken } from './magic';
@@ -16,6 +18,7 @@ import { BuyWizard, shouldResumeBuyWizard } from './BuyWizard';
 import { computePrintAndFrame } from '../commerce/print_size';
 import DeedOnChainRecord from './DeedOnChainRecord';
 import CertificateOfAuthenticity from './CertificateOfAuthenticity';
+import SalesAgreement from './SalesAgreement';
 
 type RenderState =
     | 'public-presale'   // visibility=public, status=live -> Listing preview + "Own this"
@@ -53,11 +56,14 @@ interface ImageData {
         context_video_url: string | null;
         wallet_address: string | null;
     };
-    description: string;
+    description: string;   // UI label: "Caption" -- short, 40-280 chars, social-share preview
+    story: string | null;  // UI label: "Story" -- optional long-form narrative, 0-2000 chars
     viewer_is_owner: boolean;
     is_creator: boolean;
     creator_profile_missing: string | null;
     isa_signed_at: string | null;
+    coa_document_version?: string | null;   // e.g., '1.0'; populated by /api/images/:id from the creator's COA Signature row; null until the binder ships
+    sales_document_version?: string | null; // e.g., '1.0'; populated by /api/images/:id from the parties' SALES_AGREEMENT Signature rows; null until the binder ships
     // Full deed surface; null pre-sale and rendered as ******* by DeedPanel.
     royalty_pct: number;
     royalty_recipient: string;
@@ -78,13 +84,27 @@ interface ImageData {
     image_height_px: number | null;
     arweave_uri: string | null;
     arweave_ready_at: string | null;
+    // Three fingerprint anchors. `sha256` keeps the industry-standard
+    // crypto naming; the other two are descriptive. UI labels render as
+    // "File fingerprint" / "Image fingerprint" / "Content fingerprint".
     sha256: string | null;
-    phash: string | null;
+    image_fingerprint: string | null;
+    content_fingerprint: string | null;
     deed_asset_id: string | null;
     deed_owner_wallet: string | null;
     deed_minted_at: string | null;
     custody_state: 'draft' | 'sealed' | 'unsealed' | 'burned';
     legal_state: 'legit' | 'disputed' | 'void';
+    // Optional YouTube association captured at Card 3 listing per the user
+    // spec. Verified server-side: non-private video on the creator's channel,
+    // URL must include `&t=…`. Frozen into the deed's video_snapshot at mint.
+    video_url: string | null;
+    video_moment_seconds: number | null;
+    // "Shot on" label -- camera Model + LensModel from the EXIF capture_setup
+    // block. Visible on list + view; NOT part of the Deed component (the full
+    // capture_setup lives on-chain via the Arweave metadata JSON for
+    // trustless verification).
+    shot_on: { Model: string | null; LensModel: string | null } | null;
 }
 
 export default function ImagePage({ imageId: imageIdProp }: { imageId?: string } = {}) {
@@ -203,6 +223,7 @@ function PrivateStub({ data }: { data: ImageData }) {
                     edition: data.edition,
                     isa_signed_at: data.isa_signed_at,
                     deed_asset_id: data.deed_asset_id,
+                    coa_document_version: data.coa_document_version ?? null,
                 }}
             />
         </main>
@@ -217,6 +238,7 @@ function OwnerEditView({ data, onChanged }: { data: ImageData; onChanged: () => 
     const navigate = useNavigate();
     const [title, setTitle] = useState(data.title || '');
     const [description, setDescription] = useState(data.description || '');
+    const [story, setStory] = useState(data.story || '');
     const [priceUsd, setPriceUsd] = useState(
         data.listed_price_cents != null && data.listed_price_cents > 0
             ? String(data.listed_price_cents / 100)
@@ -224,6 +246,10 @@ function OwnerEditView({ data, onChanged }: { data: ImageData; onChanged: () => 
     );
     const [creationDate, setCreationDate] = useState(
         data.creation_date ? data.creation_date.slice(0, 10) : new Date().toISOString().slice(0, 10)
+    );
+    const [videoUrl, setVideoUrl] = useState(data.video_url || '');
+    const [videoMoment, setVideoMoment] = useState(
+        data.video_moment_seconds != null ? String(data.video_moment_seconds) : ''
     );
     const [saving, setSaving] = useState(false);
     const [listing, setListing] = useState(false);
@@ -239,7 +265,7 @@ function OwnerEditView({ data, onChanged }: { data: ImageData; onChanged: () => 
     }
     const descTrim = description.trim();
     if (descTrim.length < 40 || descTrim.length > 280) {
-        missing.push('description (40-280 chars)');
+        missing.push('caption (40-280 chars)');
     }
     const priceNum = Number(priceUsd);
     if (!priceUsd || !Number.isInteger(priceNum) || priceNum < 5 || priceNum > 500) {
@@ -263,6 +289,7 @@ function OwnerEditView({ data, onChanged }: { data: ImageData; onChanged: () => 
     const dirty =
         title.trim() !== (data.title || '') ||
         description.trim() !== (data.description || '') ||
+        story.trim() !== (data.story || '') ||
         currentPriceCents !== (data.listed_price_cents || 0);
 
     async function persistMetadata() {
@@ -271,6 +298,7 @@ function OwnerEditView({ data, onChanged }: { data: ImageData; onChanged: () => 
             body: JSON.stringify({
                 title: title.trim(),
                 description: description.trim(),
+                story: story.trim() || null,   // empty -> null, server stores null
                 listed_price_cents: currentPriceCents,
                 // creation_date intentionally omitted -- it's EXIF-sourced
                 // and the server PATCH route is the source of truth.
@@ -299,7 +327,24 @@ function OwnerEditView({ data, onChanged }: { data: ImageData; onChanged: () => 
         setErr(null);
         try {
             if (dirty) await persistMetadata();
-            await api(`/v1/images/${data.image_id}/list`, { method: 'POST' });
+            // Optional YouTube video association -- verified server-side at
+            // list time. Server canonicalizes the URL to include `&t=<sec>s`
+            // from the seconds field (or parses from the URL if the creator
+            // pasted a timestamped link). The stored URL always has the
+            // timestamp.
+            const videoUrlTrim = videoUrl.trim();
+            const momentNum = videoMoment.trim() ? Number(videoMoment.trim()) : null;
+            const body: Record<string, unknown> = {};
+            if (videoUrlTrim) {
+                body.video_url = videoUrlTrim;
+                if (momentNum != null && Number.isInteger(momentNum) && momentNum >= 0) {
+                    body.video_moment_seconds = momentNum;
+                }
+            }
+            await api(`/v1/images/${data.image_id}/list`, {
+                method: 'POST',
+                body: Object.keys(body).length > 0 ? JSON.stringify(body) : undefined,
+            });
             onChanged();
         } catch (e) {
             setErr(e instanceof Error ? e.message : String(e));
@@ -380,11 +425,11 @@ function OwnerEditView({ data, onChanged }: { data: ImageData; onChanged: () => 
                 />
             </section>
 
-            {/* Row 3: description */}
+            {/* Row 3: caption (short marketplace preview blurb; wire name `description`) */}
             <textarea
-                title="Description -- 40 to 280 characters"
+                title="Caption -- 40 to 280 characters"
                 className="textarea textarea-bordered w-full bg-base-200"
-                placeholder="description"
+                placeholder="caption (40-280 chars; shown on marketplace + social previews)"
                 rows={2}
                 spellCheck
                 autoCapitalize="sentences"
@@ -392,6 +437,25 @@ function OwnerEditView({ data, onChanged }: { data: ImageData; onChanged: () => 
                 lang="en"
                 value={description}
                 onChange={e => setDescription(e.target.value)}
+            />
+
+            {/* Row 3.5: story (optional long-form narrative; UI label "Story";
+                CommonMark Markdown supported; XSS-safe via react-markdown) */}
+            <textarea
+                title="Story -- optional photographer's narrative, up to 4000 characters, CommonMark Markdown supported"
+                className="textarea textarea-bordered w-full bg-base-200 font-mono text-xs"
+                placeholder={
+                    "story (optional; up to 4000 chars; CommonMark Markdown supported)\n"
+                    + "**bold**, *italic*, # heading, - list item, [text](url), > blockquote, blank lines split paragraphs"
+                }
+                rows={8}
+                spellCheck
+                autoCapitalize="sentences"
+                autoCorrect="on"
+                lang="en"
+                value={story}
+                onChange={e => setStory(e.target.value)}
+                maxLength={4000}
             />
 
             {/* Row 4: title | creation date | price */}
@@ -434,6 +498,42 @@ function OwnerEditView({ data, onChanged }: { data: ImageData; onChanged: () => 
                 </label>
             </div>
 
+            {/* Optional YouTube video association -- verified server-side at
+                Put on Sale. Non-private video on creator's verified channel.
+                Either paste a URL with a built-in timestamp ("Copy video URL
+                at current time") OR set the moment manually below. The stored
+                URL always carries `&t=…`. Frozen into the deed's
+                video_snapshot at mint. */}
+            <div className="grid grid-cols-3 gap-3 items-end">
+                <label className="col-span-2 text-sm flex flex-col gap-1">
+                    <span className="text-xs text-base-content/60">
+                        Linked YouTube video (optional)
+                    </span>
+                    <input
+                        type="url"
+                        placeholder="https://www.youtube.com/watch?v=…"
+                        className="input input-bordered input-sm w-full"
+                        value={videoUrl}
+                        onChange={e => setVideoUrl(e.target.value)}
+                    />
+                </label>
+                <label className="text-sm flex flex-col gap-1">
+                    <span className="text-xs text-base-content/60">
+                        Moment (sec)
+                    </span>
+                    <input
+                        type="number"
+                        min="0"
+                        step="1"
+                        placeholder="83"
+                        className="input input-bordered input-sm w-full"
+                        value={videoMoment}
+                        onChange={e => setVideoMoment(e.target.value)}
+                        disabled={!videoUrl.trim()}
+                    />
+                </label>
+            </div>
+
             {/* ISA gate -- one line directly above Put on Sale. */}
             <IsaRow
                 signedAt={data.isa_signed_at}
@@ -470,6 +570,23 @@ function OwnerEditView({ data, onChanged }: { data: ImageData; onChanged: () => 
             )}
             {err && <div className="alert alert-error text-sm">{err}</div>}
         </main>
+    );
+}
+
+// "Shot on" subline rendered directly under the image title. Pulls camera
+// Model + LensModel from the EXIF capture_setup block (server-resolved on
+// the image GET response into `data.shot_on`). Visible on every "list" /
+// "view" render via the central ListingPage. Intentionally NOT in the Deed
+// component -- the full capture_setup lives on-chain via the Arweave
+// metadata JSON; this is just a human-readable header credit.
+function ShotOnLabel({ shot_on }: { shot_on: ImageData['shot_on'] }) {
+    if (!shot_on) return null;
+    const parts = [shot_on.Model, shot_on.LensModel].filter(Boolean) as string[];
+    if (parts.length === 0) return null;
+    return (
+        <p className="text-xs italic text-base-content/60">
+            Shot on {parts.join(' · ')}
+        </p>
     );
 }
 
@@ -705,6 +822,8 @@ function ListingPage({
                 </div>
             </div>
 
+            <ShotOnLabel shot_on={data.shot_on} />
+
             {/* Row 2: Image. Buyer's confirmed monogram is overlaid inline
                 with the baked-in "1 of 1" edition mark for preview; the real
                 Share Copy with the monogram baked in is generated post-mint
@@ -740,9 +859,23 @@ function ListingPage({
                     className="font-deed italic text-base-content/75 leading-relaxed bg-base-200 rounded-md px-4 py-3 whitespace-pre-line overflow-y-auto"
                 >
                     {data.description || (
-                        <span className="text-base-content/40">No description yet.</span>
+                        <span className="text-base-content/40">No caption yet.</span>
                     )}
                 </div>
+                {data.story && (
+                    <div className="bg-base-200 rounded-md px-4 py-3 space-y-2 text-sm leading-relaxed text-base-content/80">
+                        <div className="text-xs uppercase tracking-widest text-base-content/50">
+                            Story
+                        </div>
+                        {/* CommonMark Markdown (GFM tables/strikethrough/task-lists) -- ReactMarkdown
+                            escapes raw HTML by default (XSS-safe; no DOMPurify needed). */}
+                        <div className="story-md space-y-3 [&_p]:leading-relaxed [&_h1]:text-base [&_h2]:text-sm [&_h3]:text-sm [&_ul]:list-disc [&_ul]:pl-5 [&_ol]:list-decimal [&_ol]:pl-5 [&_a]:underline [&_a]:text-primary [&_code]:bg-base-300 [&_code]:px-1 [&_code]:rounded">
+                            <ReactMarkdown remarkPlugins={[remarkGfm]}>
+                                {data.story}
+                            </ReactMarkdown>
+                        </div>
+                    </div>
+                )}
                 {isPostPurchase || isOwner ? (
                     <PostPurchaseActions
                         imageId={data.image_id}
@@ -826,11 +959,34 @@ function ListingPage({
                     edition: data.edition,
                     isa_signed_at: data.isa_signed_at,
                     deed_asset_id: data.deed_asset_id,
+                    coa_document_version: data.coa_document_version ?? null,
                 }}
             />
 
             {/* Collapsible Deed panel */}
             <DeedPanel data={data} />
+
+            {/* Collapsible Sales Agreement panel -- last in the stack; visible
+                only to creator + current deed owner. Public viewers and other
+                authenticated buyers don't see the price + sale terms here. */}
+            {(data.is_creator || data.viewer_is_owner) && (
+                <SalesAgreement
+                    data={{
+                        image_id: data.image_id,
+                        title: data.title,
+                        creator_display_name: data.creator.display_name,
+                        creator_wallet: data.creator.wallet_address,
+                        deed_owner_wallet: data.deed_owner_wallet,
+                        listed_price_cents: data.listed_price_cents,
+                        purchase_price_cents: data.purchase_price_cents,
+                        purchased_at: data.purchased_at,
+                        royalty_pct: data.royalty_pct,
+                        edition: data.edition,
+                        creator_isa_signed_at: data.isa_signed_at,
+                        sales_document_version: data.sales_document_version ?? null,
+                    }}
+                />
+            )}
 
             {creatorAction}
 
@@ -902,6 +1058,10 @@ function PostPurchaseActions({
     const [downloadConfirm, setDownloadConfirm] = useState(false);
     const [downloading, setDownloading] = useState(false);
     const [downloadError, setDownloadError] = useState<string | null>(null);
+    const [downloadReveal, setDownloadReveal] = useState<
+        | null
+        | { archive_url: string; arweave_uri: string; password: string; filename_hint: string }
+    >(null);
     const [flipping, setFlipping] = useState(false);
     const [flipError, setFlipError] = useState<string | null>(null);
     const shareUrl = `${window.location.origin}/${imageId}`;
@@ -1017,60 +1177,58 @@ function PostPurchaseActions({
                 />
             )}
 
+            {downloadReveal && (
+                <DownloadRevealModal
+                    archive_url={downloadReveal.archive_url}
+                    arweave_uri={downloadReveal.arweave_uri}
+                    password={downloadReveal.password}
+                    filename_hint={downloadReveal.filename_hint}
+                    onClose={() => setDownloadReveal(null)}
+                />
+            )}
+
             {downloadConfirm && (
-                <ConfirmModal
-                    title="Download the original?"
-                    body="After you download the original file, Epimage no longer supports resale or transfer of the deed for this edition. Continue?"
-                    confirmLabel="Download"
-                    cancelLabel="Cancel"
+                <DownloadConfirmModal
                     onCancel={() => setDownloadConfirm(false)}
-                    onConfirm={async () => {
+                    onConfirm={async (initials) => {
                         setDownloadConfirm(false);
                         setDownloading(true);
                         setDownloadError(null);
                         try {
-                            // POST -> server decrypts the Master from Arweave +
-                            // PLATFORM_DEK, flips custody_state sealed->unsealed
-                            // (first call only), streams bytes with
-                            // Content-Disposition: attachment. Use a blob URL
-                            // + dynamic <a download> click to trigger the
-                            // browser's save dialog with the right filename.
+                            // POST -> server returns JSON
+                            //   { archive_url, arweave_uri, password, filename_hint, custody_state }
+                            // First call also flips custody_state sealed->unsealed
+                            // and persists enc_final_unwrapped (D-18 seal-break).
+                            // The server never decrypts the Master under D-21;
+                            // the buyer fetches the encrypted ZIP from Arweave
+                            // via archive_url and extracts client-side.
                             const didToken = await getDidToken();
                             const resp = await fetch(
                                 `/v1/deeds/${imageId}/download-master`,
                                 {
                                     method: 'POST',
-                                    headers: didToken
-                                        ? { Authorization: `Bearer ${didToken}` }
-                                        : {},
+                                    headers: {
+                                        'Content-Type': 'application/json',
+                                        ...(didToken ? { Authorization: `Bearer ${didToken}` } : {}),
+                                    },
+                                    body: JSON.stringify({ initials }),
                                 },
                             );
+                            const body = await resp.json().catch(() => ({}));
                             if (!resp.ok) {
-                                const body = await resp.json().catch(() => ({}));
                                 throw new Error(
                                     body.message ?? body.error ?? `HTTP ${resp.status}`,
                                 );
                             }
-                            // R62 §2.3 specifies the filename format:
-                            // epimage_<youtube-handle>_<owner-ordinal>_<image-id>.<ext>
-                            // The server computes it and returns via
-                            // Content-Disposition; we extract here because for
-                            // blob URLs the browser uses a.download, not the
-                            // response header.
-                            const cd = resp.headers.get('Content-Disposition') ?? '';
-                            const cdMatch = cd.match(/filename="([^"]+)"/);
-                            const filename = cdMatch?.[1] ?? `epimage_${imageId}.jpg`;
-                            const blob = await resp.blob();
-                            const url = URL.createObjectURL(blob);
-                            const a = document.createElement('a');
-                            a.href = url;
-                            a.download = filename;
-                            document.body.appendChild(a);
-                            a.click();
-                            a.remove();
-                            URL.revokeObjectURL(url);
-                            // custody_state transitioned; refresh parent so the
-                            // Deed of Ownership panel shows 'unsealed'.
+                            setDownloadReveal({
+                                archive_url: body.archive_url,
+                                arweave_uri: body.arweave_uri,
+                                password: body.password,
+                                filename_hint: body.filename_hint,
+                            });
+                            // custody_state transitioned (or stayed unsealed on
+                            // re-download); refresh parent so the Deed of
+                            // Ownership panel shows 'unsealed'.
                             onChanged?.();
                         } catch (e: any) {
                             setDownloadError(e?.message ?? 'Download failed.');
@@ -1118,6 +1276,197 @@ function ConfirmModal({
                     </button>
                     <button type="button" onClick={onConfirm} className="btn btn-neutral btn-sm">
                         {confirmLabel}
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// Pre-download click-wrap per D-22 (Master Download Notice / DLN). Shows the
+// warning about the irreversible sealed -> unsealed transition + collects the
+// buyer's typed initials as the signature artifact. Submit fires the actual
+// /download-master POST which captures the DLN signature server-side
+// (Solana-tx Memo per esign.md §2.8) before the seal-break runs. Initials
+// must be 1-10 characters; Confirm is disabled until non-empty.
+function DownloadConfirmModal({
+    onCancel,
+    onConfirm,
+}: {
+    onCancel: () => void;
+    onConfirm: (initials: string) => void;
+}) {
+    const [initials, setInitials] = useState('');
+    const [ack, setAck] = useState(false);
+    const trimmed = initials.trim();
+    const canConfirm = trimmed.length > 0 && trimmed.length <= 10 && ack;
+    return (
+        <div
+            className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+            onClick={onCancel}
+        >
+            <div
+                className="bg-base-100 rounded-lg max-w-md w-full p-6 space-y-4"
+                onClick={e => e.stopPropagation()}
+            >
+                <h3 className="font-semibold">Master Download Notice</h3>
+                <p className="text-sm text-base-content/70 leading-relaxed">
+                    Downloading the Master is <strong>irreversible</strong>:
+                </p>
+                <ul className="text-sm text-base-content/70 leading-relaxed list-disc pl-5 space-y-1">
+                    <li>Your deed transitions from <code>sealed</code> to <code>unsealed</code>.</li>
+                    <li>The transition is recorded on Solana and cannot be undone.</li>
+                    <li>Epimage will no longer facilitate resale or transfer of this deed.</li>
+                </ul>
+                <p className="text-sm text-base-content/70 leading-relaxed">
+                    By entering your initials below and confirming, you sign the Master Download Notice (part of your legal binder). Your initials, this timestamp, and your wallet co-signature on the on-chain Memo together constitute your binding signature.
+                </p>
+
+                <label className="block text-xs font-semibold text-base-content/60">
+                    Your initials (1-10 characters)
+                </label>
+                <input
+                    autoFocus
+                    type="text"
+                    maxLength={10}
+                    value={initials}
+                    onChange={e => setInitials(e.target.value)}
+                    className="input input-bordered input-sm w-full font-mono"
+                    placeholder="e.g. AS"
+                />
+
+                <label className="flex items-start gap-2 text-sm text-base-content/70 leading-relaxed cursor-pointer">
+                    <input
+                        type="checkbox"
+                        className="checkbox checkbox-sm mt-0.5"
+                        checked={ack}
+                        onChange={e => setAck(e.target.checked)}
+                    />
+                    <span>
+                        I have read the Master Download Notice and consent to the
+                        irreversible <code>sealed → unsealed</code> transition of my deed.
+                    </span>
+                </label>
+
+                <div className="flex justify-end gap-2 pt-2">
+                    <button type="button" onClick={onCancel} className="btn btn-ghost btn-sm">
+                        Cancel
+                    </button>
+                    <button
+                        type="button"
+                        onClick={() => canConfirm && onConfirm(trimmed)}
+                        disabled={!canConfirm}
+                        className="btn btn-error btn-sm"
+                    >
+                        Sign & Download
+                    </button>
+                </div>
+            </div>
+        </div>
+    );
+}
+
+// Per D-21: the server never decrypts the Master. Owner downloads the
+// encrypted ZIP from Arweave and extracts client-side using the password
+// derived from `dek_wrapped`. This modal reveals the password + offers a
+// "Download from Arweave" button that opens the platform proxy
+// (/archive/:imageId) for operational-life UX. The raw arweave.net URL is
+// shown as smaller text -- works post-cessation when the proxy is gone.
+function DownloadRevealModal({
+    archive_url,
+    arweave_uri,
+    password,
+    filename_hint,
+    onClose,
+}: {
+    archive_url: string;
+    arweave_uri: string;
+    password: string;
+    filename_hint: string;
+    onClose: () => void;
+}) {
+    const [copied, setCopied] = useState(false);
+    const onCopy = async () => {
+        try {
+            await navigator.clipboard.writeText(password);
+            setCopied(true);
+            setTimeout(() => setCopied(false), 1500);
+        } catch {
+            // Clipboard may be unavailable in some browsers / contexts;
+            // user can still select + copy manually.
+        }
+    };
+    return (
+        <div
+            className="fixed inset-0 z-50 bg-black/50 flex items-center justify-center p-4"
+            onClick={onClose}
+        >
+            <div
+                className="bg-base-100 rounded-lg max-w-md w-full p-6 space-y-4"
+                onClick={e => e.stopPropagation()}
+            >
+                <h3 className="font-semibold">Your Master is on Arweave</h3>
+                <p className="text-sm text-base-content/70 leading-relaxed">
+                    The original file is permanently archived on Arweave as a
+                    password-protected ZIP. Download it, then extract using
+                    the password below. Most OSes (Windows, macOS, iOS) handle
+                    AES-256 ZIP extraction natively.
+                </p>
+
+                <div className="space-y-1">
+                    <label className="text-xs font-semibold text-base-content/60">
+                        Password
+                    </label>
+                    <div className="flex items-center gap-2">
+                        <input
+                            readOnly
+                            value={password}
+                            onFocus={e => e.currentTarget.select()}
+                            className="input input-bordered input-sm flex-1 font-mono text-xs"
+                        />
+                        <button
+                            type="button"
+                            onClick={onCopy}
+                            className="btn btn-sm btn-neutral"
+                        >
+                            {copied ? 'Copied' : 'Copy'}
+                        </button>
+                    </div>
+                </div>
+
+                <div className="space-y-1">
+                    <label className="text-xs font-semibold text-base-content/60">
+                        File name inside the ZIP
+                    </label>
+                    <p className="text-xs font-mono text-base-content/80 break-all">
+                        {filename_hint}
+                    </p>
+                </div>
+
+                <a
+                    href={archive_url}
+                    target="_blank"
+                    rel="noopener noreferrer"
+                    className="btn btn-primary btn-sm w-full"
+                >
+                    Download ZIP from Arweave
+                </a>
+
+                <p className="text-[10px] text-base-content/50 break-all">
+                    Trustless permanent URL:&nbsp;
+                    <a
+                        href={arweave_uri}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="underline"
+                    >
+                        {arweave_uri}
+                    </a>
+                </p>
+
+                <div className="flex justify-end pt-2">
+                    <button type="button" onClick={onClose} className="btn btn-ghost btn-sm">
+                        Close
                     </button>
                 </div>
             </div>
@@ -1355,7 +1704,8 @@ function DeedPanel({ data }: { data: ImageData }) {
                             arweave_uri: data.arweave_uri,
                             arweave_ready_at: data.arweave_ready_at,
                             sha256: data.sha256,
-                            phash: data.phash,
+                            image_fingerprint: data.image_fingerprint,
+                            content_fingerprint: data.content_fingerprint,
                             minted_at: data.deed_minted_at,
                         }}
                     />

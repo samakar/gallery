@@ -11,6 +11,7 @@ export interface CertificateOfAuthenticityData {
     edition: string | null;
     isa_signed_at: string | null;   // ISO; creator's Card 1 ESIGN affirmation
     deed_asset_id: string | null;   // if set, deed exists -> ISA implied even if isa_signed_at is null
+    coa_document_version: string | null; // e.g., '1.0'; denormalized from binder.entries[coa].version on the creator's COA Signature row
 }
 
 export default function CertificateOfAuthenticity({ data }: { data: CertificateOfAuthenticityData }) {
@@ -31,7 +32,7 @@ export default function CertificateOfAuthenticity({ data }: { data: CertificateO
     return (
         <details className="bg-base-200 rounded-md group">
             <summary className="cursor-pointer px-4 py-2 text-sm text-center list-none flex items-center justify-center select-none text-base-content/55">
-                <span>Certificate of Authenticity</span>
+                <span>Certificate of Authenticity{data.coa_document_version && <span className="ml-1 text-base-content/40">v{data.coa_document_version}</span>}</span>
                 <span className="ml-2 text-base-content/40 text-xs transition-transform group-open:rotate-180">▾</span>
             </summary>
             <div className="font-deed px-6 pb-6 pt-2 space-y-4 text-base-content/80">

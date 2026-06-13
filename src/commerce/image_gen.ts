@@ -25,21 +25,69 @@ export interface UploadResult {
     version: number;        // Cloudinary version stamp; embed in URLs to bust browser cache on replacement
 }
 
+// Cloudinary access mode for the Master + every variant derived from it.
+//
+// We upload the per-image Master at public_id = <image_id> with type: 'private'
+// so the asset is NOT served by Cloudinary unless the request carries a valid
+// HMAC signature derived from CLOUDINARY_URL's api_secret. Cloudinary enforces
+// this at the CDN edge -- bypassing the platform server (e.g. by guessing
+// res.cloudinary.com/<cloud_name>/image/upload/<image_id>) fails with 404.
+//
+// All transformation URLs of the Master (Listing Preview / Share Copy /
+// Thumbnail / download variant) inherit the source's access mode, so signing
+// the Master automatically gates every derivation of it.
+//
+// Creator headshots stay at the default `type: 'upload'` (public) since
+// they're intentionally browseable as creator-profile branding.
+const MASTER_CLOUDINARY_TYPE = 'private' as const;
+
+// TTL on every signed URL the server builds for Master + variants.
+//
+// Why 60 seconds:
+//   - The signed URL never reaches a browser. The server builds it, uses it in
+//     a single upstream fetch from `/i/:imageId` proxy, then discards it.
+//   - 60s gives generous margin for network slop and platform-vs-Cloudinary
+//     clock skew, but caps the value of a leaked URL (log scrape, error
+//     payload, etc.) to ~one minute of exposure.
+//   - Shorter is tempting but earns nothing (the URL is one-shot anyway) and
+//     risks failures at the boundary if a slow upstream + 5s clock skew + a
+//     30s TTL ever collide.
+//   - Longer is wrong: the URL is never reused, so longer TTLs only grow the
+//     leak window.
+//
+// CDN-cache trade-off: because every request gets a fresh signature, the
+// per-(URL) edge cache is effectively bypassed. At MVP scale (low traffic,
+// server-direct fetches) this is fine. If listing-page hot paths ever cost
+// real Cloudinary egress, switch to a rotated-daily signature shared across
+// requests.
+const SIGNED_URL_TTL_SECONDS = 60;
+
+function signedExpiresAt(): number {
+    return Math.floor(Date.now() / 1000) + SIGNED_URL_TTL_SECONDS;
+}
+
 // Upload bytes to Cloudinary using the image_id as the deterministic
 // public_id -- so preview URLs can be reconstructed from image_id alone
 // without a DB lookup.
 //
+// type: MASTER_CLOUDINARY_TYPE ('private') means Cloudinary refuses unsigned
+// requests to <image_id> or any transformation of it. The platform server's
+// `/i/:imageId` proxy is the only path to the bytes; every URL it generates
+// carries a fresh HMAC signature (see signedExpiresAt + each buildXxxUrl).
+//
 // TODO: encryptAndStoreOriginal (per image_gen.md §2.1) wraps the Original
 // in a DEK_image and writes it to local FS, then uploads only the derived
-// variants here. At MVP we upload the cleartext directly to Cloudinary as a
-// placeholder for the Listing preview source.
+// variants here. Even with type: 'private', the bytes on Cloudinary are
+// cleartext -- a single layer of defense (Cloudinary signed-URL enforcement).
+// Encryption-at-upload is defense-in-depth on top of this.
 export async function uploadOriginal(
     image_id: string,
     buffer: Buffer
 ): Promise<UploadResult> {
     return new Promise((resolve, reject) => {
         const stream = cloudinary.uploader.upload_stream(
-            { public_id: image_id, resource_type: 'image', overwrite: false },
+            { public_id: image_id, resource_type: 'image', overwrite: false,
+              type: MASTER_CLOUDINARY_TYPE },
             (err, result) => {
                 if (err) return reject(err);
                 if (!result) return reject(new Error('Cloudinary returned no result.'));
@@ -65,6 +113,7 @@ export async function uploadFromUrl(image_id: string, remote_url: string): Promi
         public_id: image_id,
         resource_type: 'image',
         overwrite: false,
+        type: MASTER_CLOUDINARY_TYPE,    // dev test seed -- same access mode as real uploads
     });
     return {
         public_id: result.public_id,
@@ -106,6 +155,9 @@ function withSlashFix(url: string): string {
 export function buildListingPreviewUrl(image_id: string): string {
     return withSlashFix(cloudinary.url(image_id, {
         secure: true,
+        type: MASTER_CLOUDINARY_TYPE,
+        sign_url: true,
+        expires_at: signedExpiresAt(),
         transformation: [
             { fetch_format: 'auto', quality: 'auto', width: 1080, crop: 'limit' },
             // Center "Epimage" watermark in EB Garamond Italic.
@@ -221,6 +273,9 @@ export function buildShareCopyUrl(image_id: string, monogram: string): string {
     const mark = monogram?.trim() ? `1 of 1  ${monogram.trim().toUpperCase()}` : '1 of 1';
     return withSlashFix(cloudinary.url(image_id, {
         secure: true,
+        type: MASTER_CLOUDINARY_TYPE,
+        sign_url: true,
+        expires_at: signedExpiresAt(),
         transformation: [
             { fetch_format: 'auto', quality: 'auto', width: 1080, crop: 'limit' },
             // URL text -- same EPGSLASH sentinel + post-process trick as
@@ -272,6 +327,9 @@ export function buildDownloadUrl(image_id: string, monogram: string): string {
     const filename = `epimage-${image_id}`;
     return withSlashFix(cloudinary.url(image_id, {
         secure: true,
+        type: MASTER_CLOUDINARY_TYPE,
+        sign_url: true,
+        expires_at: signedExpiresAt(),
         // Force JPEG + Content-Disposition: attachment with our chosen filename.
         format: 'jpg',
         flags: `attachment:${filename}`,
@@ -370,13 +428,21 @@ export function buildHeadshotUrl(public_id: string, version?: number): string {
 // post-purchase /download-master decrypts these bytes and serves the Master
 // to the deed holder.
 export function buildOriginalUrl(image_id: string): string {
-    return cloudinary.url(image_id, { secure: true });
+    return cloudinary.url(image_id, {
+        secure: true,
+        type: MASTER_CLOUDINARY_TYPE,
+        sign_url: true,
+        expires_at: signedExpiresAt(),
+    });
 }
 
 // Square thumbnail for grid views (Creator dashboard, Collection).
 export function buildThumbnailUrl(image_id: string): string {
     return cloudinary.url(image_id, {
         secure: true,
+        type: MASTER_CLOUDINARY_TYPE,
+        sign_url: true,
+        expires_at: signedExpiresAt(),
         transformation: [
             { fetch_format: 'auto', quality: 'auto', width: 600, height: 600, crop: 'fill', gravity: 'auto' },
         ],

@@ -21,6 +21,10 @@ export async function applyMintSucceeded(
     assetId: string,
     transactionSignature: string | null,
     ownerWallet: string | null,
+    snapshots?: {
+        creator_snapshot: Record<string, unknown> | null;
+        video_snapshot: Record<string, unknown> | null;
+    },
 ): Promise<void> {
     const purchase = await prisma.purchase.findUnique({
         where: { id: purchaseId },
@@ -48,6 +52,16 @@ export async function applyMintSucceeded(
                     custody_state: 'sealed',
                     legal_state: 'legit',
                     variant_hashes: variantHashes,
+                    // Mirror moment-of-sealing YouTube snapshots to the DB row
+                    // (also embedded into the Arweave metadata JSON). Null when
+                    // creator has no YouTube association OR the API fetch
+                    // failed at mint. No backfill at MVP per product scope.
+                    creator_snapshot: snapshots?.creator_snapshot
+                        ? JSON.stringify(snapshots.creator_snapshot)
+                        : null,
+                    video_snapshot: snapshots?.video_snapshot
+                        ? JSON.stringify(snapshots.video_snapshot)
+                        : null,
                     minted_at: new Date(),
                 },
             });
@@ -105,7 +119,7 @@ async function sendCoaEmailForPurchase(
         where: { image_id: purchase.image_id },
         include: {
             creator: { include: { user: true } },
-            signatures: { where: { document_type: 'IMAGE_SIGNING_AFFIRMATION' }, take: 1, orderBy: { clicked_at: 'desc' } },
+            signatures: { where: { document_type: 'COA' }, take: 1, orderBy: { clicked_at: 'desc' } },
         },
     });
     if (!image) return;

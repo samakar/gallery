@@ -14,6 +14,7 @@
 // same exported function.
 
 import { prisma } from '../../db';
+import { encryptedMasterStore } from '../../registry/arweave_master';
 
 const SWEEP_INTERVAL_MS = 30 * 1000; // poll every 30s
 const HEAD_TIMEOUT_MS = 10 * 1000;   // give the gateway up to 10s per check
@@ -43,6 +44,14 @@ export async function sweepArweaveReady(): Promise<{ checked: number; stamped: n
                 });
                 console.log('[sweep.arweave-ready] stamped', row.image_id);
                 stamped++;
+
+                // Arweave is now the authoritative encrypted-Master copy for
+                // this image. Delete the FS entry so the store doesn't grow
+                // indefinitely with sold inventory. `/download-master` falls
+                // back to Arweave automatically when the store returns null.
+                // Best-effort: delete failures are logged inside the store
+                // helper, never throw to the sweeper.
+                await encryptedMasterStore.delete(row.image_id);
             }
         } catch {
             // Network errors, timeouts, etc. -- next sweep will retry.

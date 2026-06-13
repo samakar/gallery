@@ -146,8 +146,8 @@ export async function initCheckout(input: InitCheckoutInput): Promise<InitChecko
     const licenseSig = await prisma.signature.findUnique({
         where: { id: input.license_signature_id },
     });
-    if (!licenseSig || licenseSig.user_id !== input.owner_id || licenseSig.document_type !== 'LICENSE_ACCEPTANCE') {
-        throw new Error('LICENSE_REQUIRED');
+    if (!licenseSig || licenseSig.user_id !== input.owner_id || licenseSig.document_type !== 'SAL') {
+        throw new Error('SAL_REQUIRED');
     }
     if (input.mja_signature_id) {
         const mjaSig = await prisma.signature.findUnique({

@@ -10,6 +10,8 @@
 // /docs/registry/crossmint_webhook.md and /docs/commerce/payments.md.
 
 import express, { type Request, type Response, type NextFunction } from 'express';
+import { fileURLToPath } from 'node:url';
+import path from 'node:path';
 import multer from 'multer';
 import { createHash } from 'node:crypto';
 import exifr from 'exifr';
@@ -28,10 +30,14 @@ import { startArweaveReadySweeper } from '../workers/arweave_ready_sweeper';
 import { httpLogger, logger } from '../logger';
 import rateLimit from 'express-rate-limit';
 import Arweave from 'arweave';
-import { generatePlatformDek, decryptMaster, unwrapDek, buildEncFinalUnwrapped } from '../../cert/crypto';
-import { readEncryptedMasterLocal } from '../../registry/arweave_master';
+import { generatePlatformDek, unwrapDek, buildEncFinalUnwrapped, generateDekImage, wrapDek } from '../../cert/crypto';
+import { buildArweaveZip } from '../../cert/zip';
+import { computePixelSha256 } from '../../cert/pixel_hash';
+import { verifyVideoOwnership, parseVideoMomentSeconds } from '../../cert/youtube_snapshot';
+import { encryptedMasterStore } from '../../registry/arweave_master';
 import { validateUniqueness, sharpPhashComputer, prismaPerCreatorStore } from '../../cert/image_uniqueness';
 import { captureSignature } from '../../cert/esign';
+import { assertCreatorAllowlisted, assertNoOwnerRole, assertNoCreatorRole } from '../../cert/identity';
 import { getLegalDoc, listLegalDocs, type LegalDocType } from '../../cert/legal';
 import { verifyEligibility as verifyYoutubeEligibility, buildAuthorizationUrl as buildYoutubeAuthorizationUrl } from '../../cert/youtube_eligibility';
 import { verifyRecaptchaToken } from '../../cert/recaptcha';
@@ -70,6 +76,11 @@ const TITLE_MIN_WORDS = 2;
 const TITLE_MAX_WORDS = 5;
 const DESC_MIN_CHARS = 40;
 const DESC_MAX_CHARS = 280;
+// Story (long-form photographer narrative; UI label "Story"). Optional --
+// 0 means absent. CommonMark Markdown is supported; the higher cap absorbs
+// formatting overhead (headers, lists, bold/italic markers). ~2-3 pages of
+// formatted prose.
+const STORY_MAX_CHARS = 4000;
 const BIO_MIN_CHARS = 40;
 const BIO_MAX_CHARS = 280;
 
@@ -81,6 +92,20 @@ function validateTitle(raw: string): string | null {
     const words = t.split(/\s+/).filter(Boolean).length;
     if (words < TITLE_MIN_WORDS || words > TITLE_MAX_WORDS) {
         return `Title must be ${TITLE_MIN_WORDS}-${TITLE_MAX_WORDS} words.`;
+    }
+    return null;
+}
+
+// Validates the "Story" field. Empty / null is accepted (optional). If
+// non-empty, capped at STORY_MAX_CHARS. CommonMark Markdown is supported --
+// the UI renders via react-markdown which escapes raw HTML by default
+// (XSS-safe; no DOMPurify needed). No content-pattern filter required.
+function validateStory(raw: string | null | undefined): string | null {
+    if (raw == null) return null;
+    const s = raw.trim();
+    if (s.length === 0) return null;
+    if (s.length > STORY_MAX_CHARS) {
+        return `Story must be 0-${STORY_MAX_CHARS} characters.`;
     }
     return null;
 }
@@ -192,6 +217,183 @@ async function extractCreationDate(buffer: Buffer): Promise<Date> {
     return new Date();
 }
 
+// Capture-setup block (camera / lens / exposure / format / Artist + Copyright).
+// Read at Card 1 upload from EXIF; frozen into the deed's `capture_setup`
+// block in the Arweave metadata JSON at mint. Distinguishes professional
+// capture (specific Make/Model + lens metadata + manual exposure + RAW + a
+// camera-programmed Artist field) from phone / point-and-shoot defaults.
+//
+// All fields are nullable. A null block (no EXIF at all, or empty EXIF) is
+// itself a signal -- presence of even a partial block is the discriminator.
+interface CaptureSetup {
+    // Hardware identification
+    Make: string | null;
+    Model: string | null;
+    LensMake: string | null;
+    LensModel: string | null;
+    LensSerialNumber: string | null;
+    BodySerialNumber: string | null;        // SerialNumber tag; phones rarely write it
+    // Physical optics & exposure
+    FNumber: number | null;                 // f-stop, e.g. 2.8
+    MaxApertureValue: number | null;        // lens's widest aperture (f-stop); exifr converts from APEX
+    FocalLength: number | null;             // physical mm, e.g. 85.0
+    FocalLengthIn35mmFilm: number | null;   // full-frame equivalent mm
+    ExposureTime: string | null;            // shutter speed, e.g. "1/2000"
+    ISOSpeedRatings: number | null;         // sensor sensitivity, e.g. 100
+    ExposureProgram: string | null;         // "Manual", "Aperture priority", "Auto", etc. -- intent discriminator
+    // Capture format (derived)
+    capture_format: 'RAW' | 'JPEG' | 'HEIC' | 'PNG' | 'TIFF' | 'unknown' | null;
+    // Professional workflow & ownership
+    Artist: string | null;                  // Creator name pre-programmed into the camera body
+    Copyright: string | null;
+    ColorSpace: string | null;              // "sRGB" | "Adobe RGB" | "Uncalibrated" etc.
+    // GPS-presence flag. True when the original capture EXIF contains
+    // GPSLatitude/Longitude. **Coordinates themselves are NOT stored** -- only
+    // the boolean -- so location privacy is preserved while still recording
+    // the cameras-vs-phones signal (phones almost always write GPS; deliberate
+    // professional captures often do not, or have it stripped).
+    gps_record: boolean;
+}
+
+// EXIF ExposureProgram tag enum (TIFF 6.0 / EXIF 2.32).
+const EXPOSURE_PROGRAM_NAMES: Record<number, string> = {
+    0: 'Not defined',
+    1: 'Manual',
+    2: 'Normal program',
+    3: 'Aperture priority',
+    4: 'Shutter priority',
+    5: 'Creative program',
+    6: 'Action program',
+    7: 'Portrait mode',
+    8: 'Landscape mode',
+};
+
+// EXIF ColorSpace tag values per spec.
+const COLOR_SPACE_NAMES: Record<number, string> = {
+    1: 'sRGB',
+    2: 'Adobe RGB',     // not officially in the spec but widely written
+    65535: 'Uncalibrated',
+};
+
+// File-magic + EXIF-derived capture format. The user's spec calls this out
+// because RAW is a near-binary professional signal phones rarely produce.
+function deriveCaptureFormat(buffer: Buffer, exifMake: string | null): CaptureSetup['capture_format'] {
+    if (buffer.length < 12) return 'unknown';
+    const b = buffer;
+    // JPEG SOI marker.
+    if (b[0] === 0xFF && b[1] === 0xD8) return 'JPEG';
+    // PNG signature.
+    if (b[0] === 0x89 && b[1] === 0x50 && b[2] === 0x4E && b[3] === 0x47) return 'PNG';
+    // HEIC / HEIF: ftyp box with brand `heic`, `heix`, `mif1`, etc.
+    if (b[4] === 0x66 && b[5] === 0x74 && b[6] === 0x79 && b[7] === 0x70) {
+        const brand = b.subarray(8, 12).toString('ascii');
+        if (/^(heic|heix|hevc|hevx|mif1|msf1)/.test(brand)) return 'HEIC';
+    }
+    // TIFF signature -- "II*\0" (little-endian) or "MM\0*" (big-endian).
+    if (
+        (b[0] === 0x49 && b[1] === 0x49 && b[2] === 0x2A && b[3] === 0x00) ||
+        (b[0] === 0x4D && b[1] === 0x4D && b[2] === 0x00 && b[3] === 0x2A)
+    ) {
+        // TIFF container -- most camera RAWs (CR2, NEF, ARW, ORF, RAF, etc.)
+        // are TIFF-based. If we see a camera Make in EXIF, label as RAW;
+        // otherwise call it TIFF (could be a graphics tool's TIFF export).
+        return exifMake ? 'RAW' : 'TIFF';
+    }
+    return 'unknown';
+}
+
+function parseExposureTime(value: unknown): string | null {
+    if (typeof value === 'number' && isFinite(value) && value > 0) {
+        return value >= 1 ? `${value}` : `1/${Math.round(1 / value)}`;
+    }
+    if (typeof value === 'string') {
+        const m = value.match(/^(\d+)\s*\/\s*(\d+)$/);
+        if (m) return `${Number(m[1])}/${Number(m[2])}`;
+        const n = Number(value);
+        if (isFinite(n) && n > 0) {
+            return n >= 1 ? `${n}` : `1/${Math.round(1 / n)}`;
+        }
+    }
+    return null;
+}
+
+async function extractCaptureSetup(buffer: Buffer): Promise<CaptureSetup | null> {
+    let exif: any = null;
+    try {
+        // GPS enabled only to detect coordinate presence -- we set
+        // `gps_record` from it and intentionally drop the actual lat/lng
+        // values so location privacy is preserved.
+        exif = await exifr.parse(buffer, {
+            tiff: true,
+            ifd0: true,
+            exif: true,
+            gps: true,
+            interop: false,
+            ifd1: false,
+            mergeOutput: true,
+        } as unknown as Parameters<typeof exifr.parse>[1]);
+    } catch (e) {
+        console.warn('[extractCaptureSetup] exifr error', (e as Error).message);
+    }
+    const Make = exif?.Make ? String(exif.Make).trim() : null;
+
+    const exposureProgramRaw = exif?.ExposureProgram;
+    const ExposureProgram = typeof exposureProgramRaw === 'number'
+        ? (EXPOSURE_PROGRAM_NAMES[exposureProgramRaw] ?? `Mode ${exposureProgramRaw}`)
+        : (typeof exposureProgramRaw === 'string' ? exposureProgramRaw : null);
+
+    const colorSpaceRaw = exif?.ColorSpace;
+    const ColorSpace = typeof colorSpaceRaw === 'number'
+        ? (COLOR_SPACE_NAMES[colorSpaceRaw] ?? `ColorSpace(${colorSpaceRaw})`)
+        : (typeof colorSpaceRaw === 'string' ? colorSpaceRaw : null);
+
+    // GPS presence detection -- check the canonical EXIF GPS tags and
+    // exifr's convenience `latitude`/`longitude` shortcuts. Coordinates
+    // themselves are intentionally NOT propagated to the output.
+    const gps_record = !!(
+        exif?.GPSLatitude != null ||
+        exif?.GPSLongitude != null ||
+        exif?.latitude != null ||
+        exif?.longitude != null
+    );
+
+    const fields: CaptureSetup = {
+        Make,
+        Model: exif?.Model ? String(exif.Model).trim() : null,
+        LensMake: exif?.LensMake ? String(exif.LensMake).trim() : null,
+        LensModel: exif?.LensModel ? String(exif.LensModel).trim() : null,
+        LensSerialNumber: exif?.LensSerialNumber ? String(exif.LensSerialNumber).trim() : null,
+        BodySerialNumber: exif?.SerialNumber ? String(exif.SerialNumber).trim() : null,
+        FNumber: typeof exif?.FNumber === 'number' ? exif.FNumber : null,
+        MaxApertureValue: typeof exif?.MaxApertureValue === 'number' ? exif.MaxApertureValue : null,
+        FocalLength: typeof exif?.FocalLength === 'number' ? exif.FocalLength : null,
+        FocalLengthIn35mmFilm: typeof exif?.FocalLengthIn35mmFormat === 'number'
+            ? exif.FocalLengthIn35mmFormat
+            : (typeof exif?.FocalLengthIn35mmFilm === 'number' ? exif.FocalLengthIn35mmFilm : null),
+        ExposureTime: parseExposureTime(exif?.ExposureTime),
+        ISOSpeedRatings: typeof exif?.ISO === 'number'
+            ? exif.ISO
+            : (typeof exif?.ISOSpeedRatings === 'number' ? exif.ISOSpeedRatings : null),
+        ExposureProgram,
+        capture_format: deriveCaptureFormat(buffer, Make),
+        Artist: exif?.Artist ? String(exif.Artist).trim() : null,
+        Copyright: exif?.Copyright ? String(exif.Copyright).trim() : null,
+        ColorSpace,
+        gps_record,
+    };
+
+    // If literally every signal is empty (every nullable field is null,
+    // capture_format is 'unknown', and gps_record is false), return null so
+    // the deed records `capture_setup: null` (a clear "no metadata" signal)
+    // instead of an all-nulls envelope.
+    const noSignal = Object.entries(fields).every(([k, v]) => {
+        if (k === 'capture_format') return v === 'unknown';
+        if (k === 'gps_record') return v === false;
+        return v == null;
+    });
+    return noSignal ? null : fields;
+}
+
 // Listing precondition: creator profile must be complete (everything the
 // public creator-presence block needs). Returns null if OK, else the first
 // missing field's friendly name.
@@ -251,6 +453,22 @@ const authLimiter = rateLimit({
 app.use(['/v1/auth/', '/v1/signatures', '/v1/purchases'], authLimiter);
 
 app.use(express.json());
+
+// Static assets served at /static/* -- favicon, collection cover image (consumed
+// by /collection.json -> Solana Explorer Collection page), share-card OG images,
+// etc. The source dir lives next to this file (src/app/api/static/) so it travels
+// with the API code. Compiled builds preserve the sibling layout because tsc
+// emits to dist/app/api/server.js with dist/app/api/static/ alongside.
+// Per go-live checklist §1: "wire Express static middleware so /static/* resolves
+// to src/app/api/static/."
+const STATIC_DIR = path.join(path.dirname(fileURLToPath(import.meta.url)), 'static');
+app.use('/static', express.static(STATIC_DIR, {
+    // Versionless filenames -- safe to cache aggressively. Cache-busting belongs
+    // upstream of this route (callers append ?v=<rev> when invalidation matters).
+    maxAge: '7d',
+    immutable: false,
+    fallthrough: false, // 404 the request rather than handing to the SPA fallback
+}));
 
 // Multipart for file uploads. memoryStorage keeps the buffer in RAM so we can
 // stream straight to Cloudinary without a temp file. Two caps -- images are
@@ -431,7 +649,8 @@ app.get('/v1/creator/youtube/authorize-url', async (req, res) => {
 
 // Step 2: client POSTs the OAuth authorization code returned by Google.
 // Server exchanges code -> access_token, calls channels.list, applies gates,
-// persists snapshot on users row + inserts creator_allowlist on pass.
+// persists the YouTube snapshot on users row on pass. The allowlist gate
+// (identity.md §2.4) is a separate env-driven check at sign-cma.
 app.post('/v1/creator/youtube/verify', async (req, res) => {
     const { user_id } = await authAsync(req);
     if (!user_id) return res.status(401).json({ error: 'AUTH_REQUIRED' });
@@ -464,25 +683,17 @@ app.post('/v1/creator/youtube/verify', async (req, res) => {
         });
     }
 
-    // Persist the snapshot + auto-allowlist atomically.
+    // Persist the snapshot. No allowlist side-effect; the allowlist gate is
+    // a separate env-driven check at sign-cma (identity.md §2.4).
     try {
-        await prisma.$transaction(async tx => {
-            await tx.user.update({
-                where: { user_id },
-                data: {
-                    youtube_channel_id: result.channel_id,
-                    youtube_channel_handle: result.channel_handle,
-                    youtube_subscriber_count_at_onboarding: result.subscriber_count,
-                    youtube_verified_at: result.verified_at,
-                },
-            });
-            // Upsert -- if a manual founder row already exists, leave it (its
-            // `note` may carry vetting context we don't want to overwrite).
-            await tx.creatorAllowlist.upsert({
-                where: { email: user.email },
-                create: { email: user.email, note: 'youtube_oauth' },
-                update: {},
-            });
+        await prisma.user.update({
+            where: { user_id },
+            data: {
+                youtube_channel_id: result.channel_id,
+                youtube_channel_handle: result.channel_handle,
+                youtube_subscriber_count_at_onboarding: result.subscriber_count,
+                youtube_verified_at: result.verified_at,
+            },
         });
     } catch (e: any) {
         // The unique constraint on users.youtube_channel_id fires here if
@@ -530,16 +741,19 @@ app.post('/v1/creator/sign-cma', async (req, res) => {
     if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' });
     if (user.creator) return res.status(409).json({ error: 'ALREADY_A_CREATOR' });
 
-    // Allowlist gate (identity.md §2.4). Allowlist row is auto-inserted by
-    // YouTube verify on pass; manual founder rows also count.
-    const allowlistRow = await prisma.creatorAllowlist.findUnique({
-        where: { email: user.email },
-    });
-    if (!allowlistRow) return res.status(403).json({ error: 'CREATOR_NOT_ALLOWLISTED' });
+    // MVP single-role exclusivity (identity.md §2.3). Block sign-cma if user is
+    // already a buyer. Dual-role is a planned future feature (OI-04b).
+    const roleClear = await assertNoOwnerRole(user_id);
+    if (!roleClear.ok) return res.status(409).json({ error: 'ROLE_CONFLICT_USER_IS_BUYER' });
 
-    // youtube_channel_handle must be populated. Manual-allowlist exception
-    // path (note != 'youtube_oauth') is allowed through with a fallback handle
-    // -- founder will edit display values post-sign-cma.
+    // Allowlist gate (identity.md §2.4). Launch-phase env-driven check; inert
+    // when CREATOR_ALLOWLIST_ENABLED != 'true'.
+    const allowed = await assertCreatorAllowlisted(user.email);
+    if (!allowed.ok) return res.status(403).json({ error: 'CREATOR_NOT_ALLOWLISTED' });
+
+    // youtube_channel_handle must be populated. Allowlist-only path (no YouTube
+    // verification) is allowed through with a fallback handle -- founder will
+    // edit display values post-sign-cma.
     const youtube_channel_handle = user.youtube_channel_handle ?? `@${user.email.split('@')[0]}`;
 
     const body = (req.body ?? {}) as {
@@ -620,10 +834,17 @@ app.post('/v1/creator/sign-cma', async (req, res) => {
         return res.status(500).json({ error: 'SIGN_CMA_FAILED', message: e?.message ?? String(e) });
     }
 
-    // TODO(identity.md §2.6, INV-4): identity.provisionWalletIfMissing(user_id).
-    // Wallets subsystem is not yet wired -- creators end up with NULL
-    // wallet_address at MVP. Card 1 (Certify) doesn't need the wallet; first
-    // purchase by this creator (when they self-buy a test listing) will need it.
+    // TODO(identity.md §2.6, INV-4, esign.md §2.8):
+    // Per creator_onboarding_wsd.md the wallet must be provisioned BEFORE
+    // CMA sign so the Solana-tx ESIGN can co-sign the Memo tx with the user's
+    // wallet. Wire identity.provisionWalletIfMissing into a step BEFORE this
+    // route (either at /v1/creator/youtube/verify success or a dedicated
+    // /v1/auth/provision-wallet route), then add a WALLET_REQUIRED guard at
+    // the top of this route that rejects when users.wallet_address is NULL.
+    // Today this route runs without wallet provisioning and CMA is captured
+    // as a click-only signatures row (no Solana-tx); creators end up with
+    // NULL wallet_address at MVP. Both gaps close together when the Solana-tx
+    // ESIGN ships per esign.md §2.8.
 
     // Onboarding email per /docs/cert/email.md §3.2 -- fire-and-forget so the
     // response returns immediately even if Postmark is slow / down. The
@@ -680,17 +901,15 @@ app.get('/v1/creator/onboarding-status', async (req, res) => {
         },
     });
     if (!user) return res.status(404).json({ error: 'USER_NOT_FOUND' });
-    const allowlistRow = await prisma.creatorAllowlist.findUnique({
-        where: { email: user.email },
-        select: { email: true },
-    });
+    const allowed = await assertCreatorAllowlisted(user.email);
+    const allowlisted = allowed.ok;
     res.json({
         youtube_verified: user.youtube_verified_at !== null,
-        allowlisted: allowlistRow !== null,
+        allowlisted,
         cma_signed: user.creator !== null,
         next_step: user.creator
             ? 'complete'
-            : user.youtube_verified_at && allowlistRow
+            : user.youtube_verified_at && allowlisted
                 ? 'sign-cma'
                 : 'youtube-verify',
     });
@@ -734,6 +953,15 @@ app.post('/v1/signatures', async (req, res) => {
         doc = getLegalDoc(document_type as LegalDocType);
     } catch {
         return res.status(400).json({ error: 'UNKNOWN_DOCUMENT_TYPE' });
+    }
+
+    // MVP single-role exclusivity (identity.md §2.3). MJA signature implies
+    // buyer intent -- block if user is already a creator. Dual-role is a planned
+    // future feature (OI-04b). Check fires before the Signature row is created
+    // so no orphan rows are written on rejection.
+    if (document_type === 'MJA') {
+        const roleClear = await assertNoCreatorRole(user_id);
+        if (!roleClear.ok) return res.status(409).json({ error: 'ROLE_CONFLICT_USER_IS_CREATOR' });
     }
     const ip = req.ip ?? req.socket.remoteAddress ?? 'unknown';
     const sig = await prisma.signature.create({
@@ -1196,7 +1424,11 @@ app.get('/v1/images/:imageId', async (req, res) => {
             orderBy: { completed_at: 'desc' },
         });
         purchased_at = confirming?.completed_at?.toISOString() ?? img.deed.minted_at.toISOString();
-        if (viewer_is_owner) {
+        if (viewer_is_owner || is_creator) {
+            // Both deed owner and creator see the sale price -- they are the
+            // two signatories to the SALES_AGREEMENT (per cert/legal_binder.md)
+            // and both have a legitimate claim to know what the work sold for.
+            // Public viewers and other authenticated buyers still see null.
             purchase_price_cents = confirming?.amount_gross_cents ?? null;
         }
     }
@@ -1211,6 +1443,22 @@ app.get('/v1/images/:imageId', async (req, res) => {
         pending_purchase_id,
         status: img.status,
         visibility: img.visibility,
+        video_url: img.video_url ?? null,
+        video_moment_seconds: img.video_moment_seconds ?? null,
+        // "Shot on" label fields -- just the two human-readable bits the image
+        // page needs. The full capture_setup block lives on the deed metadata
+        // JSON for trustless verification, not exposed here piecewise.
+        shot_on: (() => {
+            if (!img.capture_setup) return null;
+            try {
+                const cs = JSON.parse(img.capture_setup) as {
+                    Model?: string | null;
+                    LensModel?: string | null;
+                };
+                if (!cs.Model && !cs.LensModel) return null;
+                return { Model: cs.Model ?? null, LensModel: cs.LensModel ?? null };
+            } catch { return null; }
+        })(),
         // Always expose dimensions from the Image row -- image_spec JSON may
         // be null on older rows but these columns are populated at upload
         // time. Lets the print-size calc work even when image_spec is null.
@@ -1230,6 +1478,7 @@ app.get('/v1/images/:imageId', async (req, res) => {
             wallet_address: img.creator.user.wallet_address ?? null,
         },
         description: img.description,
+        story: img.story ?? null,
         viewer_is_owner,
         is_creator,
         creator_profile_missing: profile_missing,
@@ -1242,8 +1491,12 @@ app.get('/v1/images/:imageId', async (req, res) => {
         image_spec,
         arweave_uri: img.arweave_uri ?? null,
         arweave_ready_at: img.arweave_ready_at?.toISOString() ?? null,
+        // `sha256` keeps industry convention; the other two use semantic
+        // names. UI display labels render as "File fingerprint" /
+        // "Image fingerprint" / "Content fingerprint".
         sha256: img.sha256 ?? null,
-        phash: img.phash ?? null,
+        image_fingerprint: img.pixel_sha256 ?? null,
+        content_fingerprint: img.phash ?? null,
         deed_asset_id: img.deed?.asset_id ?? null,
         deed_owner_wallet: img.deed?.owner_wallet_address ?? null,
         deed_minted_at: img.deed?.minted_at?.toISOString() ?? null,
@@ -1398,16 +1651,23 @@ app.post('/v1/images', imageUpload.single('file'), async (req, res) => {
     }
     const phash = gate.phash;
 
-    // image_id_generator may collide rarely (36^5); retry handful of times.
+    // Deterministic image_id derived from (user_id, time, retry counter).
+    // Same inputs reproduce the same id, which is convenient for tests and
+    // post-hoc reconstruction. Collisions are rare at MVP scale (36^5 ≈ 60M);
+    // on hit, increment the retry suffix to derive a fresh candidate.
+    const seedBase = `${user_id}-${Date.now()}`;
     let image_id = '';
     for (let i = 0; i < 5; i++) {
-        const candidate = generateImageId();
+        const candidate = generateImageId(`${seedBase}-${i}`);
         const clash = await prisma.image.findUnique({ where: { image_id: candidate } });
         if (!clash) { image_id = candidate; break; }
     }
     if (!image_id) return res.status(500).json({ error: 'ID_COLLISION' });
 
     // Upload to Cloudinary first; only persist the row if it succeeds.
+    // (Cloudinary holds the cleartext Master at MVP; Option A signed URLs gate
+    // access. Post-MVP, Cloudinary upload switches to a smaller derived
+    // variant per image_gen.md §2.9 + the planned Card-1 encryption refactor.)
     let uploaded;
     try {
         uploaded = await uploadOriginal(image_id, req.file.buffer);
@@ -1418,14 +1678,53 @@ app.post('/v1/images', imageUpload.single('file'), async (req, res) => {
 
     const creation_date = await extractCreationDate(req.file.buffer);
     const imageSpec = await extractImageSpec(req.file.buffer);
+    const captureSetup = await extractCaptureSetup(req.file.buffer);
 
     // Compute the SHA-256 over the original upload bytes -- the actual Master
     // pixels. We have the buffer in hand from multer, so no Cloudinary
     // roundtrip. This is the SAME hash that the deed will anchor at mint time
     // (M+00 in variant_hashes), so what the buyer verifies pre-sale matches
-    // what gets committed on-chain post-sale. arweave_master.ts reads
-    // Image.sha256 (idempotent read-through) instead of re-hashing.
+    // what gets committed on-chain post-sale.
     const masterSha256 = createHash('sha256').update(req.file.buffer).digest('hex');
+    // Pixel-content identity anchor: sha256 over the JPEG with metadata
+    // marker segments byte-surgically stripped. Null for non-JPEG containers
+    // (PNG / TIFF / HEIC / WebP) at MVP. See /src/cert/pixel_hash.ts.
+    const pixelSha256 = computePixelSha256(req.file.buffer);
+
+    // Per D-21: package the upload buffer as a ZIP-AES-256 archive at Card 1
+    // and write it to the encrypted-Master store. Card 5 (`arweave_master`)
+    // lifts those bytes to Arweave as-is (pass-through; no decrypt, no rezip).
+    // `/download-master` later returns the password + Arweave URL to the
+    // owner, who extracts the ZIP with native OS tools -- the server never
+    // holds the cleartext Master in memory after this request.
+    //
+    // Password = base64(DEK_image). The DEK is wrapped with PLATFORM_DEK and
+    // stored on the row so the platform can recover it for the password-reveal
+    // modal at /download-master. The doubly-nested `enc_final` envelope is
+    // constructed later at Card 5 by run_image_ops + cnft_dispatch.
+    //
+    // No backup at MVP -- if the store loses the entry pre-sale, the creator
+    // re-uploads.
+    const dek_image = generateDekImage();
+    const dek_wrapped = wrapDek(dek_image);
+    const password = dek_image.toString('base64');
+    let encryptedMasterZip: Buffer;
+    try {
+        encryptedMasterZip = await buildArweaveZip(req.file.buffer, image_id, password);
+    } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        return res.status(500).json({ error: 'ZIP_BUILD_FAILED', message });
+    }
+    try {
+        await encryptedMasterStore.write(image_id, encryptedMasterZip);
+    } catch (err) {
+        // Cloudinary already has the cleartext at this point. Failing the
+        // upload here would leave an orphaned Cloudinary asset; surface a
+        // clear error so the creator can retry. The Cloudinary asset stays
+        // (cleanup is a separate ops concern).
+        const message = err instanceof Error ? err.message : String(err);
+        return res.status(500).json({ error: 'ENCRYPTED_MASTER_STORE_WRITE_FAILED', message });
+    }
 
     const created = await prisma.image.create({
         data: {
@@ -1441,7 +1740,10 @@ app.post('/v1/images', imageUpload.single('file'), async (req, res) => {
             height_px: uploaded.height,
             phash,
             sha256: masterSha256,
+            pixel_sha256: pixelSha256,
             image_spec: JSON.stringify(imageSpec),
+            capture_setup: captureSetup ? JSON.stringify(captureSetup) : null,
+            dek_wrapped,
         },
     });
     res.json({
@@ -1467,7 +1769,7 @@ app.patch('/v1/images/:imageId/metadata', async (req, res) => {
         return res.status(409).json({ error: 'IMMUTABLE_STATUS', status: img.status });
     }
 
-    const { title, description, listed_price_cents } = req.body ?? {};
+    const { title, description, story, listed_price_cents } = req.body ?? {};
     // creation_date is intentionally NOT in the editable set -- it's pulled
     // from EXIF DateTimeOriginal at upload and immutable thereafter.
 
@@ -1496,6 +1798,17 @@ app.patch('/v1/images/:imageId/metadata', async (req, res) => {
         if (!r.ok) return res.status(400).json({ error: r.code, message: r.message });
         nextDescription = r.value;
     }
+    // Story is optional. Empty string from the UI -> store null. Caller passing
+    // `story: undefined` leaves the existing value alone.
+    let nextStory: string | null | undefined = undefined;
+    if (typeof story === 'string') {
+        const storyErr = validateStory(story);
+        if (storyErr) return res.status(400).json({ error: 'INVALID_STORY', message: storyErr });
+        const trimmed = story.trim();
+        nextStory = trimmed.length === 0 ? null : trimmed;
+    } else if (story === null) {
+        nextStory = null;
+    }
 
     await prisma.image.update({
         where: { image_id: img.image_id },
@@ -1503,6 +1816,7 @@ app.patch('/v1/images/:imageId/metadata', async (req, res) => {
             title: nextTitle,
             description: nextDescription,
             listed_price: next_price,
+            ...(nextStory !== undefined ? { story: nextStory } : {}),
         },
     });
     res.json({ ok: true });
@@ -1570,9 +1884,9 @@ app.post('/v1/images/:imageId/sign-affirmation', async (req, res) => {
     );
     const result = await captureSignature({
         user_id,
-        document_type: 'IMAGE_SIGNING_AFFIRMATION',
+        document_type: 'COA',
         document_text: documentText,
-        document_version_label: 'ISA-v1.0',
+        document_version_label: 'COA-v1.0',
         image_id: img.image_id,
         click: {
             ip_address: req.ip ?? '0.0.0.0',
@@ -1799,9 +2113,100 @@ app.post('/v1/images/:imageId/list', async (req, res) => {
         });
     }
 
+    // Optional creator-supplied YouTube video association. Captured at Card 3
+    // listing and verified server-side against the creator's verified YouTube
+    // channel (per spec: non-private video on creator's own channel). The
+    // STORED URL always carries `&t=<sec>s`. Source of the seconds value:
+    //   - body.video_moment_seconds if supplied (UI's seconds input)
+    //   - otherwise parsed from the URL's `t=` param
+    //   - else reject VIDEO_MOMENT_REQUIRED
+    // The server canonicalizes the URL (drops any existing `t`, appends
+    // the resolved seconds), then runs verifyVideoOwnership against the
+    // canonical form so storage and verification agree.
+    const listBody = (req.body ?? {}) as {
+        video_url?: string | null;
+        video_moment_seconds?: number | null;
+    };
+    let nextVideoUrl: string | null = null;
+    let nextVideoMomentSeconds: number | null = null;
+    if (typeof listBody.video_url === 'string' && listBody.video_url.trim().length > 0) {
+        const userRow = await prisma.user.findUnique({
+            where: { user_id },
+            select: { youtube_channel_id: true },
+        });
+        if (!userRow?.youtube_channel_id) {
+            return res.status(409).json({
+                error: 'CREATOR_YOUTUBE_NOT_VERIFIED',
+                message: 'Verify your YouTube channel before associating a video with a listing.',
+            });
+        }
+        // Resolve seconds: body input wins, else parse from URL.
+        let resolvedSeconds: number | null = null;
+        const bodyM = listBody.video_moment_seconds;
+        if (bodyM != null) {
+            if (!Number.isInteger(bodyM) || bodyM < 0 || bodyM > 86_400) {
+                return res.status(400).json({
+                    error: 'INVALID_MOMENT_SECONDS',
+                    message: 'video_moment_seconds must be a non-negative integer (seconds into the video).',
+                });
+            }
+            resolvedSeconds = bodyM;
+        } else {
+            resolvedSeconds = parseVideoMomentSeconds(listBody.video_url);
+        }
+        if (resolvedSeconds == null) {
+            return res.status(409).json({
+                error: 'VIDEO_MOMENT_REQUIRED',
+                message: 'Enter the moment (seconds) where the scene occurs in the video, or paste a YouTube URL with a `&t=` timestamp.',
+            });
+        }
+        // Canonicalize the URL: strip any existing `t=`, append the resolved
+        // seconds as `&t=<sec>s`. Stored URL always carries the timestamp.
+        let canonicalUrl: string;
+        try {
+            const u = new URL(listBody.video_url.trim());
+            u.searchParams.delete('t');
+            u.searchParams.set('t', `${resolvedSeconds}s`);
+            canonicalUrl = u.toString();
+        } catch {
+            return res.status(409).json({
+                error: 'INVALID_VIDEO_URL',
+                message: 'Not a recognizable YouTube video URL.',
+            });
+        }
+        const verify = await verifyVideoOwnership(canonicalUrl, userRow.youtube_channel_id);
+        if (!verify.ok) {
+            // 503 on transient outage so the UI can offer a retry CTA without
+            // confusing the creator into thinking their input was rejected.
+            // 500 on server misconfig. 409 on caller-fixable input errors.
+            const status =
+                verify.error_code === 'YOUTUBE_API_UNAVAILABLE' ? 503
+                : verify.error_code === 'YOUTUBE_API_NOT_CONFIGURED' ? 500
+                : 409;
+            if (status === 503) res.setHeader('Retry-After', '60');
+            return res.status(status).json({
+                error: verify.error_code,
+                message: verify.message,
+            });
+        }
+        nextVideoUrl = canonicalUrl;
+        nextVideoMomentSeconds = verify.moment_seconds;
+    }
+
     await prisma.image.update({
         where: { image_id: img.image_id },
-        data: { status: 'live', visibility: 'public', published_at: new Date() },
+        data: {
+            status: 'live',
+            visibility: 'public',
+            published_at: new Date(),
+            // Only overwrite the video association if the caller passed one;
+            // missing video_url in the body leaves the existing value alone.
+            // To clear, the caller passes video_url: null (handled at the
+            // route layer post-MVP via a dedicated clear endpoint).
+            ...(nextVideoUrl != null
+                ? { video_url: nextVideoUrl, video_moment_seconds: nextVideoMomentSeconds }
+                : {}),
+        },
     });
     res.json({ ok: true });
 });
@@ -1826,6 +2231,9 @@ app.post('/v1/purchases', async (req, res) => {
     if (image.creator_id === user_id) {
         return res.status(400).json({ error: 'SELF_PURCHASE_FORBIDDEN' });
     }
+    // MVP single-role exclusivity is enforced at MJA capture (/v1/signatures);
+    // by the time checkout init runs, the buyer is already MJA-signed so no
+    // additional check is needed here.
 
     try {
         const result = await initCheckout({
@@ -1966,18 +2374,31 @@ app.get('/v1/creators/by-handle/:handle', async (req, res) => {
 // variant (Listing Copy pre-sale, Share Copy post-mint). Lets us expose a
 // short canonical URL in the <img src> so a "Copy image address" gives
 // `<origin>/i/<image_id>` -- localhost in dev, epimage.com in prod.
-// Deed-holder Master Image download (R71 §1.1 + R62 §3.5.1).
-// Buyer requests Master download -> server fetches encrypted Master from
-// Arweave, decrypts via unwrapped DEK_image, streams bytes with
-// Content-Disposition: attachment. First successful call flips custody_state
-// from 'sealed' to 'unsealed' (one-way; D-18 seal-break also persists
-// enc_final_unwrapped). Subsequent calls are idempotent: re-stream the
-// Master without further state mutation.
+// Deed-holder Master download (R71 §1.1 + R62 §3.5.1) -- per D-21 the server
+// never decrypts. The endpoint returns:
+//   - `archive_url`: /archive/:imageId (platform proxy → arweave.net)
+//   - `arweave_uri`: raw arweave.net/<tx_id> (trustless permanent fallback)
+//   - `password`: base64(DEK_image) -- the AES-256 ZIP password
+// The buyer fetches the ZIP from Arweave and extracts client-side with native
+// OS tooling. First call also fires the D-18 seal-break: custody_state flips
+// `sealed → unsealed` + `enc_final_unwrapped` is published on the deed.
+// Subsequent calls re-issue the password without further state mutation.
+//
+// **D-22 (Download Notice click-wrap)**: first call requires body
+// `{ initials: string }`. The server captures a DLN signature (legal binder
+// entry per legal/download_notice.md) before the seal-break runs. The buyer's
+// wallet co-signs the resulting Solana-tx Memo per esign.md §2.8 (consent
+// record on-chain). Subsequent calls (already-unsealed deeds) skip DLN
+// capture -- the consent record is one-shot per owner-tenure.
 //
 // MVP scope: custody_state transition is DB-only. On-chain `update_metadata_v1`
 // sync is post-MVP (see /docs/divergences.md OI-04). Authorization gate
 // requires BOTH custody axis allows it (sealed | unsealed; burned blocks) AND
 // legal axis allows it (legit; disputed | void blocks).
+//
+// At resale (post-MVP), platform will need to extract the ZIP server-side to
+// regenerate the Share Copy for the new owner -- see /src/cert/zip.ts
+// `extractFromZipAes256` (stubbed).
 app.post('/v1/deeds/:imageId/download-master', async (req, res) => {
     const { user_id } = await authAsync(req);
     if (!user_id) return res.status(401).json({ error: 'AUTH_REQUIRED' });
@@ -2005,107 +2426,99 @@ app.post('/v1/deeds/:imageId/download-master', async (req, res) => {
     if (!image.dek_wrapped) {
         return res.status(500).json({ error: 'NO_DEK_WRAPPED' });
     }
+    if (!image.arweave_uri) {
+        return res.status(503).json({
+            error: 'ARWEAVE_NOT_READY',
+            message: 'The encrypted Master is not yet on Arweave. The deed-build pipeline is still in progress; retry shortly.',
+        });
+    }
 
-    // Source the encrypted Master from local disk first (MVP operative path
-    // per R71 §1.1: platform delivers from the local copy persisted at
-    // arweave_master time). Arweave fallback only if local is missing -- e.g.
-    // legacy deeds minted before D-11 local persistence shipped.
-    let ciphertext: Buffer | null = await readEncryptedMasterLocal(imageId);
-    if (!ciphertext && image.arweave_uri) {
-        try {
-            const arResp = await fetch(image.arweave_uri);
-            if (arResp.ok) {
-                const buf = Buffer.from(await arResp.arrayBuffer());
-                // D-11 fallback uploads a JSON manifest when out of Turbo
-                // credits, not encrypted bytes. Detect that to surface a
-                // clearer error than a downstream decrypt failure.
-                if (buf.length === 0 || buf[0] === 0x7b) {
-                    return res.status(503).json({
-                        error: 'MASTER_NOT_RECOVERABLE',
-                        message: 'Local encrypted Master is missing and the Arweave URI points at a D-11 manifest stub rather than the encrypted bytes. This image needs to be re-uploaded after the Arweave wallet is funded, or a new purchase needs to be walked through.',
-                    });
-                }
-                // Pre-2026-06-06 ADR-0010 mints (now superseded) wrote a nested
-                // ZIP envelope here. Detect the ZIP magic header (`PK\x03\x04`)
-                // and refuse with a clear error rather than failing decryptMaster
-                // opaquely. Future mints upload R62-aligned AES-256-GCM ciphertext
-                // that decryptMaster can handle.
-                if (
-                    buf.length >= 4
-                    && buf[0] === 0x50 && buf[1] === 0x4b
-                    && buf[2] === 0x03 && buf[3] === 0x04
-                ) {
-                    return res.status(503).json({
-                        error: 'MASTER_LEGACY_ADR_0010_ZIP',
-                        message: 'This image was minted under ADR-0010 (now superseded) and its Arweave copy is a nested ZIP envelope. The platform cannot decrypt it server-side. The buyer can recover via 7-Zip + their wallet signature using the ADR-0010 recovery procedure.',
-                    });
-                }
-                ciphertext = buf;
-            } else {
-                return res.status(502).json({
-                    error: 'ARWEAVE_FETCH_FAILED',
-                    http: arResp.status,
-                });
-            }
-        } catch (e: any) {
-            return res.status(502).json({
-                error: 'ARWEAVE_FETCH_FAILED',
-                message: e?.message ?? String(e),
+    // First-call only: require the buyer's typed initials as the DLN
+    // (Download Notice) click-wrap. Empty / missing initials reject with
+    // INITIALS_REQUIRED. Subsequent calls (already-unsealed) skip this --
+    // the consent record already exists on-chain from the first download.
+    const isFirstDownload = image.deed.custody_state === 'sealed';
+    const body = (req.body ?? {}) as { initials?: string };
+    const initials = typeof body.initials === 'string' ? body.initials.trim() : '';
+    if (isFirstDownload) {
+        if (!initials) {
+            return res.status(400).json({
+                error: 'INITIALS_REQUIRED',
+                message: 'Download Notice (DLN) requires your typed initials to confirm consent before the first download.',
+            });
+        }
+        if (initials.length > 10) {
+            return res.status(400).json({
+                error: 'INITIALS_TOO_LONG',
+                message: 'Initials must be 1-10 characters.',
             });
         }
     }
-    if (!ciphertext) {
-        return res.status(500).json({
-            error: 'MASTER_NOT_FOUND',
-            message: 'No local encrypted Master and no Arweave URI to fall back to.',
-        });
-    }
 
-    // Decrypt with DEK_image unwrapped from PLATFORM_DEK.
-    let plaintext: Buffer;
+    // Unwrap DEK_image (used as the ZIP password) and, on first call, peel
+    // the outer PLATFORM_DEK wrap of enc_final to produce enc_final_unwrapped.
+    let dek_image: Buffer;
     try {
-        plaintext = decryptMaster(ciphertext, Buffer.from(image.dek_wrapped));
+        dek_image = unwrapDek(Buffer.from(image.dek_wrapped));
     } catch (e: any) {
         return res.status(500).json({
-            error: 'DECRYPT_FAILED',
+            error: 'DEK_UNWRAP_FAILED',
             message: e?.message ?? String(e),
         });
     }
+    const password = dek_image.toString('base64');
 
-    // Custody state machine: sealed -> unsealed. Idempotent; subsequent
-    // downloads re-stream without mutating state.
+    // Custody state machine: sealed -> unsealed (one-way; D-18 seal-break also
+    // persists enc_final_unwrapped). Subsequent calls are idempotent.
     if (image.deed.custody_state === 'sealed') {
+        // Capture the DLN signature BEFORE the seal-break. If the signature
+        // capture fails, the deed stays sealed and the buyer can retry. The
+        // Solana-tx Memo broadcast is fire-and-forget per esign.md §2.8;
+        // the synchronous Signature row + the buyer's wallet co-sign on the
+        // queued tx are the consent record.
+        let dlnDoc;
+        try {
+            dlnDoc = getLegalDoc('DLN');
+        } catch {
+            return res.status(500).json({ error: 'DLN_DOC_NOT_FOUND' });
+        }
+        const clicked_at = new Date().toISOString();
+        const documentText = `${dlnDoc.text}\n\n---\nDeed image_id: ${imageId}\nOwner wallet: ${image.deed.owner_wallet_address}\nInitials: ${initials}\nSigned at: ${clicked_at}\n`;
+        const sigResult = await captureSignature({
+            user_id,
+            document_type: 'DLN',
+            document_text: documentText,
+            document_version_label: dlnDoc.label,
+            image_id: imageId,
+            click: {
+                ip_address: req.ip ?? '0.0.0.0',
+                session_token_hash: createHash('sha256').update(user_id).digest('hex'),
+                clicked_at,
+            },
+        });
+        if (!sigResult.ok) {
+            return res.status(500).json({
+                error: 'DLN_SIGNATURE_FAILED',
+                message: sigResult.message,
+            });
+        }
+        // M+01 hash anchor: under D-21 the server doesn't see cleartext at
+        // download time, so the M+N hash is not computed here. The deed's
+        // M+00 anchor (recorded at mint) covers byte-identity. M+N variant
+        // hashes per R62 §7.4 are deferred until/unless the buyer reports a
+        // hash mismatch (resale-era concern).
         const currentHashes = (() => {
             try { return JSON.parse(image.deed.variant_hashes ?? '{}'); }
             catch { return {}; }
         })();
-        // Per R62 §7.4, the platform-delivered Master variant for owner
-        // ordinal N is keyed M+N. First owner is N=1 (mint anchor is M+00).
-        currentHashes['M+01'] = {
-            sha256: createHash('sha256').update(plaintext).digest('hex'),
-            anchored_at: new Date().toISOString(),
-            owner_ordinal: 1,
-        };
 
-        // Per the user's 2026-06-07 directive: at the seal-break event, peel
-        // the outer PLATFORM_DEK layer of enc_final and persist the inner
-        // sealed-box on the Deed. The deed-holder can now combine their
-        // wallet privkey + the unwrapped value to independently decrypt the
-        // Arweave Master and verify it matches the on-chain sha256 anchor --
-        // without further platform cooperation. INV-02 preserved: the
-        // disclosed value is owner-wallet-bound; without the privkey it
-        // reveals nothing. PLATFORM_DEK stays secret (AES-256 resists
-        // known-plaintext attacks). Mirroring this to on-chain deed metadata
-        // via Bubblegum updateMetadataV2 is post-MVP (requires DAS
-        // getAssetProof; tracked in /docs/registry/arweave_master.md).
+        // Peel the outer PLATFORM_DEK layer of enc_final per D-18. The deed
+        // holder can combine their wallet privkey + the unwrapped value to
+        // decrypt the Arweave Master independently. INV-02 preserved: the
+        // disclosed value is owner-wallet-bound.
         let unwrapped: string | null = null;
         try {
-            if (image.dek_wrapped) {
-                const dek_image = unwrapDek(Buffer.from(image.dek_wrapped));
-                unwrapped = buildEncFinalUnwrapped(dek_image, image.deed.owner_wallet_address);
-            } else {
-                logger.warn({ image_id: imageId }, '[download-master] missing dek_wrapped; cannot compute enc_final_unwrapped');
-            }
+            unwrapped = buildEncFinalUnwrapped(dek_image, image.deed.owner_wallet_address);
         } catch (e: any) {
             logger.warn({ image_id: imageId, err: e?.message ?? String(e) }, '[download-master] enc_final_unwrapped computation failed');
         }
@@ -2120,23 +2533,24 @@ app.post('/v1/deeds/:imageId/download-master', async (req, res) => {
         });
     }
 
-    // Stream the Master to the browser with explicit attachment header.
-    // Filename per R62 §2.3 line 149: epimage_<youtube-handle>_<owner-ordinal>_<image-id>.<ext>
-    // Sanitize the YouTube handle (strip leading '@' and non-alphanumeric
-    // chars) so the underscore field delimiter stays parseable.
+    // Filename hint for the buyer per R62 §2.3 line 149:
+    // epimage_<youtube-handle>_<owner-ordinal>_<image-id>.jpg
+    // (the JPEG name inside the ZIP; the ZIP itself is `<image_id>.zip`).
     const ownerOrdinal = 1; // First owner; no resale at MVP.
     const handleSanitized = (image.creator?.youtube_channel_handle ?? '')
         .replace(/^@/, '')
         .replace(/[^A-Za-z0-9]/g, '')
         .toLowerCase();
-    const filename = sanitizeFilename(
-        `epimage_${handleSanitized}_${ownerOrdinal}_${imageId}.jpg`,
-        `epimage_${imageId}.jpg`,
-    );
-    res.setHeader('Content-Type', 'image/jpeg');
-    res.setHeader('Content-Disposition', `attachment; filename="${filename}"`);
-    res.setHeader('Content-Length', String(plaintext.length));
-    return res.send(plaintext);
+    const filename_hint = `epimage_${handleSanitized}_${ownerOrdinal}_${imageId}.jpg`;
+
+    return res.json({
+        ok: true,
+        archive_url: `/archive/${imageId}`,
+        arweave_uri: image.arweave_uri,
+        password,
+        filename_hint,
+        custody_state: 'unsealed',
+    });
 });
 
 // Arweave-Master proxy per D-19. The deed UI shows the canonical
@@ -2518,10 +2932,13 @@ app.use((err: any, req: Request, res: Response, next: NextFunction) => {
     next(err);
 });
 
-// Catch-all.
-app.use((err: Error, _req: Request, res: Response, _next: NextFunction) => {
-    console.error('[api]', err);
-    res.status(500).json({ error: 'INTERNAL', message: err.message });
+// Catch-all. Respect err.statusCode if upstream set one (e.g. express.static
+// raises a 404-coded error when fallthrough is off and the file doesn't exist).
+app.use((err: any, _req: Request, res: Response, _next: NextFunction) => {
+    const status: number = err?.statusCode ?? err?.status ?? 500;
+    if (status >= 500) console.error('[api]', err);
+    const error = status === 404 ? 'NOT_FOUND' : 'INTERNAL';
+    res.status(status).json({ error, message: err?.message ?? String(err) });
 });
 
 // Eager startup checks for env vars that arweave_master.ts only logs lazily

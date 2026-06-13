@@ -272,7 +272,7 @@ function ContractsStep({
         let cancelled = false;
         Promise.all([
             api<{ has_mja: boolean }>('/v1/me/esign-status').catch(() => ({ has_mja: false })),
-            api<LegalDoc>('/v1/legal/LICENSE_ACCEPTANCE'),
+            api<LegalDoc>('/v1/legal/SAL'),
         ])
             .then(async ([status, l]) => {
                 if (cancelled) return;
@@ -305,7 +305,7 @@ function ContractsStep({
             }
             const r = await api<{ signature_id: string }>('/v1/signatures', {
                 method: 'POST',
-                body: JSON.stringify({ document_type: 'LICENSE_ACCEPTANCE', image_id: imageId }),
+                body: JSON.stringify({ document_type: 'SAL', image_id: imageId }),
             });
             onSigned({ mja_signature_id: mjaSigId, license_signature_id: r.signature_id });
         } catch (e: any) {

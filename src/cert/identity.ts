@@ -12,7 +12,9 @@ import { prisma } from '../db';
 export type IdentityErrorCode =
     | "MAGIC_DID_INVALID"
     | "ROLE_REQUIRED"
-    | "CREATOR_NOT_ALLOWLISTED";
+    | "CREATOR_NOT_ALLOWLISTED"
+    | "ROLE_CONFLICT_USER_IS_BUYER"
+    | "ROLE_CONFLICT_USER_IS_CREATOR";
 
 export type Role = "creator" | "owner" | "moderator";
 
@@ -30,12 +32,25 @@ export type IdentityResult<T> =
     | { ok: false; error_code: IdentityErrorCode; message: string };
 
 // Verify DID token from `Authorization: Bearer <token>`; upsert users row;
-// derive roles from creators/owners row existence + env-config moderator DID.
-// R71 §3.7 row 1 (POST /v1/auth/session) + middleware on every authed route.
+// derive roles from creators/owners row existence + wallet provisioning + env
+// moderator DID. R71 §3.7 row 1 (POST /v1/auth/session) + middleware on every
+// authed route.
+//
+// Role derivation (single source of truth):
+//   is_creator   = (creators row exists for user_id) AND (users.wallet_address NOT NULL)
+//   is_owner     = (owners row exists for user_id)   AND (users.wallet_address NOT NULL)
+//   is_moderator = (users.magic_did == process.env.FOUNDER_MAGIC_DID)
+//
+// The wallet requirement on is_creator / is_owner aligns the flag with the
+// post-onboarding state observable to the user -- creator_onboarding_wsd.md
+// step 8 (dashboard renders) is the first request where is_creator reads true;
+// step 6 (sign-cma) commits the creators row + step 7 (wallet provisioning)
+// runs in the same HTTP request, so both side-effects land together and the
+// next verifyDidToken call sees the flag flip.
 export async function verifyDidToken(token: string): Promise<IdentityResult<AuthenticatedPrincipal>> {
     // TODO: magic.token.validate(token); magic.token.getIssuer(token) -> magic_did
     // TODO: prisma.users.upsert by magic_did; load oauth_provider + email from claim
-    // TODO: derive roles from creators/owners row existence + env FOUNDER_MAGIC_DID
+    // TODO: derive roles per the formula above
     return { ok: false, error_code: "MAGIC_DID_INVALID", message: "TODO" };
 }
 
@@ -49,10 +64,36 @@ export function requireRole(p: AuthenticatedPrincipal, role: Role): IdentityResu
         : { ok: false, error_code: "ROLE_REQUIRED", message: `Role ${role} required.` };
 }
 
-// Hard precondition for POST /v1/creator/sign-cma (R71 §3.7 row 4).
+// MVP single-role exclusivity (identity.md §2.3). At MVP a `users` row carries
+// at most ONE of `creator` or `owner`. Dual-role is a planned future feature
+// (OI-04b); when it lands, callers can drop these guards without schema change.
+export async function assertNoOwnerRole(user_id: string): Promise<IdentityResult<true>> {
+    const has = await prisma.owner.findUnique({ where: { user_id }, select: { user_id: true } });
+    return has
+        ? { ok: false, error_code: "ROLE_CONFLICT_USER_IS_BUYER", message: `User ${user_id} already has an owner role; dual-role is post-MVP.` }
+        : { ok: true, value: true };
+}
+
+export async function assertNoCreatorRole(user_id: string): Promise<IdentityResult<true>> {
+    const has = await prisma.creator.findUnique({ where: { user_id }, select: { user_id: true } });
+    return has
+        ? { ok: false, error_code: "ROLE_CONFLICT_USER_IS_CREATOR", message: `User ${user_id} already has a creator role; dual-role is post-MVP.` }
+        : { ok: true, value: true };
+}
+
+// Launch-phase gate for POST /v1/creator/sign-cma (identity.md §2.4). When
+// CREATOR_ALLOWLIST_ENABLED is not "true" the gate is inert. When enabled,
+// CREATOR_ALLOWLIST_EMAILS is a comma-separated list; whitespace and case are
+// normalized before comparison.
 export async function assertCreatorAllowlisted(email: string): Promise<IdentityResult<true>> {
-    const hit = await prisma.creatorAllowlist.findUnique({ where: { email } });
-    return hit
+    if (process.env.CREATOR_ALLOWLIST_ENABLED !== "true") {
+        return { ok: true, value: true };
+    }
+    const allowed = (process.env.CREATOR_ALLOWLIST_EMAILS ?? "")
+        .split(",")
+        .map(s => s.trim().toLowerCase())
+        .filter(s => s.length > 0);
+    return allowed.includes(email.trim().toLowerCase())
         ? { ok: true, value: true }
         : { ok: false, error_code: "CREATOR_NOT_ALLOWLISTED", message: `Email ${email} not on creator allowlist.` };
 }

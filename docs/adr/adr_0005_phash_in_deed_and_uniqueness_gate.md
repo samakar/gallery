@@ -11,7 +11,7 @@ R62 §4.3 (Deed-content field-state schema, line 493) lists perceptual hash as a
 
 R62 §7.1.2 / §7.1.7 specify a content-uniqueness gate at Card 1 ingestion that produces this phash plus a DINOv2 neural embedding for cross-creator duplicate detection.
 
-R71 (MVP spec) dropped both: phash is absent from the deed-metadata schema in [crossmint_dispatch.md](../registry/crossmint_dispatch.md), absent from the `images` table, and the uniqueness gate was wholesale-deferred to MMP. The R71 ingestion window keeps only format / dimensions / megapixels / aspect / quality gates from [image_spec.md](../cert/image_spec.md).
+R71 (MVP spec) dropped both: phash is absent from the deed-metadata schema in [deed.md](../registry/deed.md), absent from the `images` table, and the uniqueness gate was wholesale-deferred to MMP. The R71 ingestion window keeps only format / dimensions / megapixels / aspect / quality gates from [image_spec.md](../cert/image_spec.md).
 
 Two consequences of the drop:
 
@@ -30,7 +30,7 @@ Bringing both back aligns MVP with R62 and closes both gaps with a single mechan
    - **DINOv2** (Tier 2): deferred to MMP in code (stub adapter ships at MVP) -- the spec contract is honored, the neural-embedding implementation is not. Cross-creator manual-review (§7.1.7) is consequently also stubbed at MVP.
 3. **Per-creator hard-reject only at MVP.** Tier 1 (phash, Hamming ≤ 6) blocks `CREATOR_DUPLICATE` re-uploads by the same creator -- the directly user-visible duplicate-upload symptom. Tier 2 (DINOv2 + platform-wide query) is wired through the contract but returns pass via stubs; cross-creator gating activates at MMP without an API break.
 4. **Persistence.** New column `images.phash String?` populated at the uniqueness gate (Card 1). DINOv2 vector storage waits for the real vector store (pgvector / Qdrant) at MMP.
-5. **Deed embedding.** [arweave_master](../registry/arweave_master.md) reads `images.phash` at Card 5 and surfaces it; [crossmint_dispatch](../registry/crossmint_dispatch.md) embeds it in deed metadata as `variant_hashes["M+00"].phash`. The phash that was computed at upload is the phash that goes on-chain -- single source of truth, no recomputation drift.
+5. **Deed embedding.** [arweave_master](../registry/arweave_master.md) reads `images.phash` at Card 5 and surfaces it; [cnft_dispatch](../registry/deed.md) embeds it in deed metadata as `variant_hashes["M+00"].phash`. The phash that was computed at upload is the phash that goes on-chain -- single source of truth, no recomputation drift.
 
 ## Consequences
 
@@ -70,11 +70,11 @@ Bringing both back aligns MVP with R62 and closes both gaps with a single mechan
 | `src/cert/image_uniqueness.ts` | Already authored as stubbed; header comment pointed at deferred path -- corrected to `/docs/cert/image_uniqueness.md` |
 | `prisma/schema.prisma` | `Image.phash String?` column added |
 | `docs/registry/arweave_master.md` | Outputs + post-conditions + §2.1 mention phash; deps add `images.phash` read |
-| `docs/registry/crossmint_dispatch.md` | Inputs + variant_hashes JSON example + cross-refs include phash |
-| `docs/registry/deed_wsd.md` | Step 1 side-effect mentions phash anchoring; step 4 input list adds phash |
+| `docs/registry/deed.md` | Inputs + variant_hashes JSON example + cross-refs include phash |
+| `docs/workflows/deed_wsd.md` | Step 1 side-effect mentions phash anchoring; step 4 input list adds phash |
 | `src/app/api/server.ts` | (Pending implementation) -- `POST /v1/images` calls `validateUniqueness` after multer buffer, before image row create; rejects `CREATOR_DUPLICATE` with `409` |
-| `src/registry/arweave_master.ts` | (Pending implementation) -- include `phash` read in the output payload to `crossmint_dispatch` |
-| `src/registry/crossmint_dispatch.ts` | (Pending implementation) -- include `phash` in `variant_hashes["M+00"]` mint metadata |
+| `src/registry/arweave_master.ts` | (Pending implementation) -- include `phash` read in the output payload to `cnft_dispatch` |
+| `src/registry/cnft_dispatch.ts` | (Pending implementation) -- include `phash` in `variant_hashes["M+00"]` mint metadata |
 | `package.json` | (Pending) add `sharp`, `sharp-phash` |
 
 ## Library choice rationale
@@ -94,10 +94,10 @@ Bringing both back aligns MVP with R62 and closes both gaps with a single mechan
 |---|---|
 | [cert/image_uniqueness.md](../cert/image_uniqueness.md) | Owns the gate's interface + Tier 1/2 contract |
 | [registry/arweave_master.md](../registry/arweave_master.md) | Reads `images.phash` at Card 5; updated by this ADR |
-| [registry/crossmint_dispatch.md](../registry/crossmint_dispatch.md) | Embeds phash in deed; updated by this ADR |
+| [registry/deed.md](../registry/deed.md) | Embeds phash in deed; updated by this ADR |
 | R62 §4.3 line 493 | Original deed-schema requirement that motivated this ADR |
 | R62 §7.1.2 / §7.1.7 | Uniqueness gate + cross-creator review architecture |
 | R71 §1.3, §3.6, §3.7, §3.8, §3.9 | Sections this ADR diverges from / extends |
 
 ---
-*Last Updated: 05/29/26 17:30*
+*Last Updated: 26/06/10 15:00*

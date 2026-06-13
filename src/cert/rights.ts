@@ -1,12 +1,14 @@
 // rights.ts
 // MVP rights / license configuration. Fixed defaults: 10% creator royalty,
 // single beneficiary, Unique edition only.
-// Spec: /docs/cert/rights.md
+// Spec: /docs/registry/deed.md §1.1 (Rights tuple paragraph + royalty_pct,
+// royalty_recipients, edition schema rows). Per-image SAL agreement text lives
+// in the legal binder per /docs/cert/legal_binder.md.
 //
 // Operational enforcement lives elsewhere: royalty on resale via the Metaplex
-// Core royalty plugin (onchain); contractual binding via License Acceptance
-// (esign). This module owns the MVP rights constants and the License Acceptance
-// text rendering.
+// Core royalty plugin (onchain); contractual binding via the SAL signature
+// (esign + binder). This module's surface is dead at MVP (no callers) -- it
+// remains as an accessor stub for cnft_dispatch's future Crossmint integration.
 
 import { prisma } from '../db';
 
@@ -48,31 +50,8 @@ export async function getDeedRightsParams(image_id: string): Promise<DeedRightsP
     };
 }
 
-export interface LicenseAcceptanceContext {
-    image_id: string;
-    creator_display_name: string;
-    listing_title: string;
-}
-
-// Renders per-image License Acceptance text (R62 §3.4) for esign to hash and
-// capture. Fixed template at MVP; only the per-image context is substituted.
-export function renderLicenseAcceptanceText(ctx: LicenseAcceptanceContext): string {
-    return [
-        `License Acceptance for "${ctx.listing_title}" by ${ctx.creator_display_name} (image-id ${ctx.image_id}).`,
-        ``,
-        `Buyer accepts the Exclusive License for this image, established in conjunction`,
-        `with the Creator Master Agreement and Master Joinder Agreement, on the`,
-        `following terms:`,
-        ``,
-        `- Field of use: personal collection, public display, social sharing.`,
-        `- Territory: worldwide.`,
-        `- Term: perpetual, subject to deed state transitions.`,
-        `- Commercial-use permission: none at MVP. Commercial reproduction requires`,
-        `  creator-enabled rights (R62 §5; deferred to MMP).`,
-        `- Sublicensing: not permitted.`,
-        `- Derivative-work rights: none.`,
-        `- Display permissions: per Owner Privacy and Share Flow (R71 §2.6).`,
-        `- Royalty terms: ${MVP_ROYALTY_PCT}% to the creator on every secondary transfer,`,
-        `  enforced via the Metaplex Core royalty plugin at mint.`,
-    ].join('\n');
-}
+// SAL contract text was previously rendered here as a template. Under the
+// legal-binder architecture (cert/legal_binder.md) the canonical SAL bytes
+// live in binder.entries[sal].content; per-deed values like image_id and
+// royalty_pct are SAL props (binder.entries[sal].props_schema). Callers
+// fetching SAL text should go through getActiveBinder() instead.

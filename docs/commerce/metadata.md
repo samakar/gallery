@@ -46,7 +46,7 @@ Per-image and per-purchase metadata management. Owns the `images`-row state surf
 #### onMintSucceeded
 | Field | Type | Notes |
 |---|---|---|
-| image_id | string(5) | called by Registry's `crossmint_webhook` on `mint.succeeded` |
+| image_id | string(5) | called by `applyMintSucceeded` (post_mint) inline from runImageOps after self-mint cnft_dispatch returns (ADR-0008) |
 
 #### captureMonogram (per ADR-0002)
 | Field | Type | Notes |
@@ -95,7 +95,7 @@ Per-image and per-purchase metadata management. Owns the `images`-row state surf
 | Pre (unlistListing) | `images.status='live'`; caller is `images.creator_id` |
 | Pre (deleteImage) | `images.status ∈ {pending_review, draft}`; caller is `images.creator_id` |
 | Pre (makePublic) | viewer is current owner (verified upstream); `images.visibility='private'` |
-| Pre (onMintSucceeded) | called by Registry's `crossmint_webhook` only |
+| Pre (onMintSucceeded) | called by `applyMintSucceeded` (post_mint) inline from runImageOps after self-mint cnft_dispatch returns |
 | Pre (captureMonogram) | `purchases.status='paid'` |
 | Post (publishListing) | `images.status='live'`; `images.visibility='public'`; `images.published_at` stamped |
 | Post (unlistListing) | `images.status='draft'`; `images.visibility='private'`; `published_at` preserved (history) |
@@ -238,7 +238,7 @@ This module never calls Stripe, Cloudinary (except CDN purge in §2.5), or Magic
 | identity | upstream owner / role check on `makePublic` and `publishListing` |
 | Cloudinary CDN purge API | invalidate SSR response on visibility flip (§2.5) |
 | runImageOps (TBD) | callbacks: `captureMonogram` (before spawn) + reads `purchases.monogram_text` (during spawn) |
-| Registry crossmint_webhook (TBD) | calls `onMintSucceeded` on `mint.succeeded` |
+| Registry post_mint (`applyMintSucceeded`) | called inline from runImageOps after cnft_dispatch returns (self-mint, synchronous per ADR-0008); invokes `onMintSucceeded` here |
 
 ## 6. Open Issues
 
@@ -275,4 +275,4 @@ This module never calls Stripe, Cloudinary (except CDN purge in §2.5), or Magic
 | R62 §4.7 | Privacy Architecture / Vault mode |
 
 ---
-*Last Updated: 05/29/26 17:00*
+*Last Updated: 26/06/10 15:00*

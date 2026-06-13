@@ -37,8 +37,7 @@ Binary image data. JPEG only. Format is asserted by the SOI magic bytes, not by 
 | Code | Trigger |
 |---|---|
 | INGESTION_FORMAT_NOT_JPEG | SOI magic bytes absent, or JPEG marker parse fails (SOF or luminance DQT unreadable) |
-| INGESTION_WINDOW_FLOOR_LONG_EDGE | long edge < 4200 px |
-| INGESTION_WINDOW_FLOOR_SHORT_EDGE | short edge < 3300 px |
+| INGESTION_WINDOW_FLOOR | long edge < 4200 px |
 | INGESTION_WINDOW_CEILING_MEGAPIXELS | width * height > 38 MP |
 | INGESTION_ASPECT_OUT_OF_BAND | longer / shorter edge outside [1, 2] |
 | INGESTION_QUALITY_BELOW_Q90 | estimated libjpeg-equivalent quality < 90 |
@@ -49,7 +48,6 @@ Fixed taxonomy aligned with R71 §3.7 "Error conventions". Adding a code is a co
 
 | Type | Condition |
 |---|---|
-| Pre (file) | binary, size >= 1 byte |
 | Post (accept) | no pixel modification; record describes file as received |
 | Post (reject) | exactly one error_code from §1.3 |
 | Post (always) | no external network call |
@@ -60,35 +58,29 @@ Fixed taxonomy aligned with R71 §3.7 "Error conventions". Adding a code is a co
 | ID | Given | When | Then |
 |---|---|---|---|
 | AC-01 | valid JPEG 5000x4000 (20 MP, aspect 1.25, est. Q92) | gate runs | accept per §1.2 |
-| AC-02 | JPEG 4000x3300 (long edge < 4200) | gate runs | INGESTION_WINDOW_FLOOR_LONG_EDGE |
-| AC-03 | JPEG 4200x3000 (short edge < 3300) | gate runs | INGESTION_WINDOW_FLOOR_SHORT_EDGE |
-| AC-04 | JPEG 8000x5000 (40 MP) | gate runs | INGESTION_WINDOW_CEILING_MEGAPIXELS |
-| AC-05 | JPEG 6000x2400 (aspect 2.5) | gate runs | INGESTION_ASPECT_OUT_OF_BAND |
-| AC-06 | JPEG estimated Q85 | gate runs | INGESTION_QUALITY_BELOW_Q90 |
-| AC-07 | PNG or TIFF bytes (SOI absent) | gate runs | INGESTION_FORMAT_NOT_JPEG |
+| AC-02 | JPEG 4000x3300 (long edge < 4200) | gate runs | INGESTION_WINDOW_FLOOR |
+| AC-03 | JPEG 8000x5000 (40 MP) | gate runs | INGESTION_WINDOW_CEILING_MEGAPIXELS |
+| AC-04 | JPEG 6000x2400 (aspect 2.5) | gate runs | INGESTION_ASPECT_OUT_OF_BAND |
+| AC-05 | JPEG estimated Q85 | gate runs | INGESTION_QUALITY_BELOW_Q90 |
+| AC-06 | PNG or TIFF bytes (SOI absent) | gate runs | INGESTION_FORMAT_NOT_JPEG |
 
 ## 2. Functional Requirements
 
 ### 2.1 Format
-JPEG only. Read the file's first two bytes and assert the JPEG SOI marker (`0xFF 0xD8`). Extension and `File.type` are spoofable; the magic-number check is the canonical format gate. Any non-JPEG -> UNSUPPORTED_FORMAT. TIFF / PNG out of scope per R71 Appendix C.
+JPEG only. Read the file's first two bytes and assert the JPEG SOI marker (`0xFF 0xD8`). Extension and `File.type` are spoofable; the magic-number check is the canonical format gate. Any non-JPEG -> INGESTION_FORMAT_NOT_JPEG. TIFF / PNG out of scope per R71 Appendix C.
 
-### 2.2 Resolution (dual per-edge floor)
+### 2.2 Resolution (long-edge floor)
 
-| Edge | Minimum |
-|---|---|
-| Long edge | >= 4200 px |
-| Short edge | >= 3300 px |
-
-Either edge below its floor -> RESOLUTION_TOO_LOW. Dimensions read from the mandatory JPEG SOF marker (reliable for every valid JPEG, independent of EXIF presence). Floor derives from an 11x14 in print at 300 DPI (R71 §1.3).
+Long edge >= 4200 px -> else INGESTION_WINDOW_FLOOR. Dimensions read from the mandatory JPEG SOF marker (reliable for every valid JPEG, independent of EXIF presence). Floor derives from a 14 in long edge at 300 DPI (R71 §1.3). Short edge is implicitly bounded by `aspect_max` (§2.4): worst case short = 4200 / 2.0 = 2100 px, supporting up to a 14×7 in print at 300 DPI; no separate short-edge floor is enforced.
 
 ### 2.3 Megapixel Ceiling
-`width * height <= 38 MP` -> else MEGAPIXEL_CEILING_EXCEEDED. Total-pixel maximum, structurally independent of the per-edge floor. Set 5% below Cloudinary's 40 MP transformation limit so an accepted image never fails the downstream transformation call (R71 §1.3, §3.3).
+`width * height <= 38 MP` -> else INGESTION_WINDOW_CEILING_MEGAPIXELS. Total-pixel maximum, structurally independent of the per-edge floor. Set 5% below Cloudinary's 40 MP transformation limit so an accepted image never fails the downstream transformation call (R71 §1.3, §3.3).
 
 ### 2.4 Aspect Ratio
-`1 <= (longer edge / shorter edge) <= 2` -> else ASPECT_RATIO_OUT_OF_BAND. Independent constraint, retained from prior spec.
+`1 <= (longer edge / shorter edge) <= 2` -> else INGESTION_ASPECT_OUT_OF_BAND. Independent constraint.
 
 ### 2.5 JPEG Quality
-Extract the luminance quantization table from the JPEG DQT marker; invert the IJG quality-scaling formula to derive the libjpeg-equivalent quality factor; assert `>= 90` -> else JPEG_QUALITY_TOO_LOW. Q90 matches typical camera / phone "fine" output (R71 §1.3).
+Extract the luminance quantization table from the JPEG DQT marker; invert the IJG quality-scaling formula to derive the libjpeg-equivalent quality factor; assert `>= 90` -> else INGESTION_QUALITY_BELOW_Q90. Q90 matches typical camera / phone "fine" output (R71 §1.3).
 
 ### 2.6 Out-of-Scope Checks
 Per revised R71, the following are NOT performed at this gate: TIFF losslessness, color-profile validation, file-size floor, C2PA manifest parse / verify, AI / generative-origin detection, upscaling detection. C2PA and invisible-watermark handling are deferred to MMP (see /docs/deferred/); synthetic-origin, NCII, right-of-publicity, and uniqueness are covered by creator contractual warranty per R71 §2.2 step 6.
@@ -96,7 +88,7 @@ Per revised R71, the following are NOT performed at this gate: TIFF losslessness
 ## 3. Architecture (Dual-Validator)
 
 ### 3.1 Client-Side (R71 §2.2 step 3)
-Runs entirely in the browser at file-select, before any upload. A single `exifr.parse(file, { sof: true, dqt: true })` pass yields width / height (SOF) and the luminance quantization table (DQT); the 2-byte SOI read is a native File API call outside exifr. The four window checks (per-edge floor, megapixel ceiling, aspect band, Q90 quality) are arithmetic on these outputs in a small in-house utility. A failing file is rejected pre-upload with the specific failing parameter displayed.
+Runs entirely in the browser at file-select, before any upload. A single `exifr.parse(file, { sof: true, dqt: true })` pass yields width / height (SOF) and the luminance quantization table (DQT); the 2-byte SOI read is a native File API call outside exifr. The four window checks (long-edge floor, megapixel ceiling, aspect band, Q90 quality) are arithmetic on these outputs in a small in-house utility. A failing file is rejected pre-upload with the specific failing parameter displayed.
 
 ### 3.2 Server-Side (Authoritative)
 Re-runs the identical checks on the uploaded bytes; the client report is not trusted. Server decision is binding; drm_csam (PhotoDNA Tier 0) and downstream DRM act only on a server Accept. See OI-01: R71 §2.2 names only the client-side gate explicitly.
@@ -148,4 +140,4 @@ No DB queries, no external APIs, no network during validation. c2pa-node, ICC pr
 | Constitution INV-03, INV-04, INV-09 | non-negotiable invariants |
 
 ---
-*Last Updated: 05/27/26 09:00*
+*Last Updated: 26/06/10 11:20*

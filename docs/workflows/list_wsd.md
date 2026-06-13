@@ -11,8 +11,8 @@ Includes the **unlist sub-flow** per [ADR-0003](../adr/adr_0003_unlist_before_ed
 | Creator authenticated | identity.verifyDidToken |
 | Image is moderator-approved | `images.status='draft'` (post-moderation per cert/moderation.md) |
 | ISA signed | `images.signing_event_id_authorship` non-null (esign) |
-| Original encrypted at rest | `images.dek_wrapped` non-null (image_gen.encryptAndStoreOriginal) |
-| Listing preview + Thumbnail built | Cloudinary `public_id` `<image_id>-listing` + `<image_id>-thumb` exist (image_gen) |
+| Master encrypted at rest | `images.dek_wrapped` non-null + `EncryptedMasterStore` entry at `<image_id>` (written at Card 1 by `POST /v1/images` per arweave_master.md §2.7) |
+| Cloudinary asset uploaded | public_id `<image_id>` (type:'private' per image_gen.md §2.10). Listing-preview + Thumbnail are URL transformations of the same asset, not separate uploads -- rendered lazily via `buildListingPreviewUrl` / `buildThumbnailUrl` (signed URLs, 60s TTL). |
 
 ## 2. Step Sequence
 
@@ -52,7 +52,7 @@ Includes the **unlist sub-flow** per [ADR-0003](../adr/adr_0003_unlist_before_ed
 
 | Step | Behavior |
 |---|---|
-| 2 (validation) | `INVALID_LISTING` if missing fields OR price out of $20-$2000 range; creator re-enters; no DB write |
+| 2 (validation) | `INVALID_LISTING` if missing fields OR price out of `$5-$500` range (server.ts `PRICE_MIN_CENTS=500` / `PRICE_MAX_CENTS=50000`, whole-dollar) OR price not a multiple of 100 cents; creator re-enters; no DB write |
 | 2 (already live) | Idempotent: returns ok; no state change (metadata.publishListing handles) |
 | 2 (not in draft) | Rejects: image must be moderator-approved first (precondition violation surfaces upstream) |
 | U2 (not live) | `NOT_LIVE`; idempotent on already-`draft` |
@@ -65,7 +65,7 @@ Includes the **unlist sub-flow** per [ADR-0003](../adr/adr_0003_unlist_before_ed
 | identity | 1, 2 (auth + creator role check) |
 | metadata | 2 (publishListing) |
 | moderation | precondition only -- image must be in `draft` (moderator-approved) |
-| image_gen | precondition only -- Original encrypted + Listing preview/Thumbnail built at Card 2 |
+| image_gen + cert/crypto + EncryptedMasterStore | precondition only -- Master encrypted + Cloudinary asset uploaded at Card 1 (`POST /v1/images`); Cloudinary variants are URL transformations, no separate build step |
 
 ## 6. Open Issues
 
@@ -94,4 +94,4 @@ Includes the **unlist sub-flow** per [ADR-0003](../adr/adr_0003_unlist_before_ed
 | R62 §4.3 | Public image page composition (post-publish render target) |
 
 ---
-*Last Updated: 05/29/26 16:45*
+*Last Updated: 26/06/10 18:30*

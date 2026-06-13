@@ -12,8 +12,9 @@ import path from 'node:path';
 export type LegalDocType =
     | 'CMA'
     | 'MJA'
-    | 'LICENSE_ACCEPTANCE'
-    | 'IMAGE_SIGNING_AFFIRMATION'
+    | 'COA'   // per binder.entries; sourced from legal/isa.md (kept under legacy filename)
+    | 'SAL'   // per binder.entries; sourced from legal/license_acceptance.md (kept under legacy filename)
+    | 'DLN'
     | 'TOS'
     | 'PRIVACY';
 
@@ -27,8 +28,9 @@ export interface LegalDoc {
 const FILE_MAP: Record<LegalDocType, string> = {
     CMA: 'cma.md',
     MJA: 'mja.md',
-    LICENSE_ACCEPTANCE: 'license_acceptance.md',
-    IMAGE_SIGNING_AFFIRMATION: 'isa.md',
+    COA: 'isa.md',                       // legacy filename kept; binder/code call this COA
+    SAL: 'license_acceptance.md',        // legacy filename kept; binder/code call this SAL
+    DLN: 'download_notice.md',
     TOS: 'tos.md',
     PRIVACY: 'privacy.md',
 };

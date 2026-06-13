@@ -53,7 +53,7 @@ No soft-delete at MVP. No `deleted_at` column. No trash bin. Cancelled work disa
 | `src/app/api/server.ts` | New `DELETE /v1/images/:imageId` route; cascade-deletes `image_reviews` then `images`, then async Cloudinary destroy |
 | `src/ui/Image.tsx` | "Delete" button on owner-editable view with `window.confirm` gate; navigates to `/creator` on success. Owner-listed view's CTA copy updated to "Take off sale to edit or delete" |
 | `docs/commerce/metadata.md` | Add `deleteImage` to interface + ACs |
-| `docs/commerce/list_wsd.md` | Mark OI-01 fully resolved (edit + delete) for pre-sale |
+| `docs/workflows/list_wsd.md` | Mark OI-01 fully resolved (edit + delete) for pre-sale |
 
 ## Cross-references
 
@@ -61,7 +61,7 @@ No soft-delete at MVP. No `deleted_at` column. No trash bin. Cancelled work disa
 |---|---|
 | [ADR-0003](adr_0003_unlist_before_edit.md) | Sister ADR -- same two-step gate for `live → draft` |
 | [commerce/metadata.md](../commerce/metadata.md) | Owns the new `deleteImage` surface |
-| [commerce/list_wsd.md](../commerce/list_wsd.md) | OI-01 update |
+| [workflows/list_wsd.md](../workflows/list_wsd.md) | OI-01 update |
 | R71 §3.4 row 6 OI | The deferred edit-AND-delete-post-publish OI this fully resolves for pre-sale |
 | R71 §3.8 | Image lifecycle (now includes row-removal terminals per this ADR) |
 

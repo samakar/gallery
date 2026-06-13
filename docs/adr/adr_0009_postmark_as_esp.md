@@ -77,7 +77,7 @@ This ADR is revisited if any of the following hold:
 - **React Email integration becomes critical** -- e.g., 30+ templates with shared design system, where Mustache becomes the bottleneck. Migration to Resend would land cleanly through the same one-file abstraction.
 
 Specifically NOT in scope for this ADR:
-- The PDF generation pipeline (separate concern; sibling module `pdf_bundle.md` TBD)
+- The PDF generation pipeline (mechanical format conversion; spec absorbed into [cert/legal_binder.md §2.3](../cert/legal_binder.md))
 - Inbound email parsing (Postmark supports it; deferred per email.md OI-09)
 - Multi-language templates (deferred per email.md OI-04)
 - Newsletter / marketing email (out of MVP scope entirely)
@@ -89,7 +89,7 @@ Specifically NOT in scope for this ADR:
 | R62 §3.5 | Original email-delivery spec; names SES; defines the legal-artifact framing |
 | R71 §1.2 | MVP deferral + broadened ESP choice (Resend / Postmark / SES) |
 | /docs/cert/email.md | Module spec consuming this ADR's decision |
-| /docs/cert/pdf_bundle.md (TBD) | Sibling module producing the COA attachments |
+| /docs/cert/legal_binder.md §2.3 | PDF rendering of binder docs (the COA attachments) |
 | /docs/go_live_checklist.md §4.8 | Operational items for ESP setup |
 | ESIGN Act (15 U.S.C. §7001 et seq.) | Record-retention requirement that email satisfies independently of the platform |
 | Vermont 12 V.S.A. §1913 | State blockchain authentication statute cited by R62 |
@@ -97,4 +97,4 @@ Specifically NOT in scope for this ADR:
 | https://postmarkapp.com/compare/resend-alternative | Postmark's own comparison (treat as advocacy; factual claims accurate) |
 
 ---
-*Last Updated: 26/06/05 12:00*
+*Last Updated: 26/06/10 12:00*

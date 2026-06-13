@@ -10,6 +10,7 @@
 // 3-of-5 multi-sig per INV-06 and is deferred to MMP.
 
 import { prisma } from '../db';
+import { encryptedMasterStore } from '../registry/arweave_master';
 
 export type TakedownErrorCode =
     | "IMAGE_NOT_FOUND"
@@ -48,6 +49,13 @@ export async function recordTakedown(input: TakedownInput): Promise<TakedownResu
         where: { image_id: input.image_id },
         data: { status: 'taken_down', takedown_reason: input.takedown_reason },
     });
+    // Best-effort: delete the encrypted Master from the store. The platform
+    // will not serve this content, so retaining the bytes on local FS is
+    // pointless and operationally unwise (CSAM/DMCA cases especially). If the
+    // store entry doesn't exist (already deleted by the arweave-ready sweeper
+    // for sold images), this is a no-op. Failures are logged inside the store
+    // helper, never thrown.
+    await encryptedMasterStore.delete(input.image_id);
     // TODO: cdn.purgePublicPage(input.image_id) -- propagate suppression (<=60s)
     return { ok: true };
 }

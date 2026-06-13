@@ -5,7 +5,7 @@ Accepted -- 2026-05-29.
 
 ## Context
 
-[docs/cert/certify_wsd.md](../cert/certify_wsd.md) step 7 places the **Image Signing Affirmation** (ISA) after **moderator review** (step 5). The implicit sequencing rule has been: a creator cannot sign the ISA until a moderator has approved the image (i.e. `images.status` has transitioned `pending_review → draft`).
+[docs/workflows/certify_wsd.md](../workflows/certify_wsd.md) step 7 places the **Image Signing Affirmation** (ISA) after **moderator review** (step 5). The implicit sequencing rule has been: a creator cannot sign the ISA until a moderator has approved the image (i.e. `images.status` has transitioned `pending_review → draft`).
 
 The rationale at the time was clean linearity -- ISA "follows" moderation in time and in the workflow diagram. But the two concerns are independent:
 
@@ -55,13 +55,13 @@ INV-2 ("ESIGN precedes the entity it admits") is preserved at the level it actua
 |---|---|
 | `src/app/api/server.ts` | Sign-affirmation precondition relaxed from `status='draft'` to `status ∈ {pending_review, draft}`; rejection code renamed `NOT_DRAFT → IMMUTABLE_STATUS` for symmetry with edit/delete gates |
 | `src/ui/Image.tsx` | `IsaRow` collapses to two states (unsigned / signed); `moderated` prop dropped; the "locked" copy is removed |
-| `docs/cert/certify_wsd.md` | Step 7 description + step-sequence note flag ISA as parallel to steps 5-6; cross-refs add ADR-0006 |
+| `docs/workflows/certify_wsd.md` | Step 7 description + step-sequence note flag ISA as parallel to steps 5-6; cross-refs add ADR-0006 |
 
 ## Cross-references
 
 | Doc | Purpose |
 |---|---|
-| [cert/certify_wsd.md](../cert/certify_wsd.md) | Workflow updated to reflect the parallel ordering |
+| [workflows/certify_wsd.md](../workflows/certify_wsd.md) | Workflow updated to reflect the parallel ordering |
 | [cert/esign.md](../cert/esign.md) | ISA interface contract -- unchanged |
 | Constitution INV-2 | Reinterpreted (was: ISA → draft; now: ISA → deed mint); no constitution edit required since the original wording supports the new reading |
 | R71 §3.7 row 7 | Endpoint contract unchanged; precondition relaxed |

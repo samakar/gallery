@@ -53,6 +53,9 @@ export default defineConfig({
       // -- backend 302s to the right Cloudinary variant. Same shape in prod
       // (epimage.com/i/<id>) so "Copy image address" produces a stable URL.
       '/i': 'http://localhost:3000',
+      // /static/* is the Express-served asset dir (favicon, collection cover,
+      // OG share cards). Same path in prod (epimage.com/static/...).
+      '/static': 'http://localhost:3000',
     },
   },
 });

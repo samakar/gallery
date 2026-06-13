@@ -17,9 +17,10 @@ import { prisma } from '../db';
 import { dispatch } from '../registry/cnft_dispatch';
 import { applyMintSucceeded } from '../registry/post_mint';
 import { buildAndUpload as buildAndUploadArweave } from '../registry/arweave_master';
-import { buildListingPreviewUrl, buildOriginalUrl } from './image_gen';
+import { buildListingPreviewUrl } from './image_gen';
 import { getStripe } from './payments';
 import { unwrapDek, buildEncFinal } from '../cert/crypto';
+import { fetchCreatorSnapshot, fetchVideoSnapshot } from '../cert/youtube_snapshot';
 
 // Quick local check matching the looksLikeSolanaAddress test in
 // crossmint_dispatch -- enc_final requires a real Solana wallet for the
@@ -49,7 +50,7 @@ export async function startBuild(input: StartBuildInput): Promise<StartBuildResu
     const purchase = await prisma.purchase.findUnique({
         where: { id: input.purchase_id },
         include: {
-            image: { include: { creator: true, deed: true } },
+            image: { include: { creator: { include: { user: true } }, deed: true } },
             owner: { include: { user: true } },
         },
     });
@@ -115,20 +116,17 @@ export async function startBuild(input: StartBuildInput): Promise<StartBuildResu
         },
     });
 
-    // The Arweave-bound payload is the actual Master (original full-resolution
-    // upload bytes), not the listing-preview. buildOriginalUrl returns the
-    // no-transformation Cloudinary delivery URL.
-    const masterUrl = buildOriginalUrl(purchase.image_id);
-
     // Step (b) per spec: upload the encrypted Master to Arweave via Turbo
-    // (R62 §1.5/§2.3 single-layer AES-256-GCM with DEK_image). The doubly-nested
-    // enc_final (asymmetric inner to wallet pubkey + symmetric outer with
-    // PLATFORM_DEK) is constructed below and written to on-chain deed metadata
-    // via cnft_dispatch. Idempotent -- skips if arweave_uri is already set.
+    // (R62 §1.5/§2.3 single-layer AES-256-GCM with DEK_image). The arweave_master
+    // module reads the ciphertext from EncryptedMasterStore (written at Card 1)
+    // and uploads it as-is -- no Cloudinary round-trip, no re-encryption. The
+    // doubly-nested enc_final (asymmetric inner to wallet pubkey + symmetric
+    // outer with PLATFORM_DEK) is constructed below and written to on-chain
+    // deed metadata via cnft_dispatch. Idempotent -- skips if arweave_uri is
+    // already set.
     const arweaveResult = await buildAndUploadArweave({
         image_id: purchase.image_id,
         buyer_wallet_pubkey: buyerWallet,
-        master_url: masterUrl,
         title: purchase.image.title,
         creator_display_name: purchase.image.creator.display_name,
     });
@@ -159,21 +157,88 @@ export async function startBuild(input: StartBuildInput): Promise<StartBuildResu
         }
     }
 
+    // Creator's per-image ISA -- threaded into the on-chain Arweave metadata
+    // JSON as the deed's creator-side COA leg. License (buyer-side) is on
+    // purchase.signing_event_id_license below.
+    let creator_isa_signing_event_id: string | null = null;
+    let creator_isa_signed_at: string | null = null;
+    if (purchase.image.signing_event_id_authorship) {
+        const isa = await prisma.signature.findUnique({
+            where: { id: purchase.image.signing_event_id_authorship },
+            select: { id: true, clicked_at: true },
+        });
+        if (isa) {
+            creator_isa_signing_event_id = isa.id;
+            creator_isa_signed_at = isa.clicked_at.toISOString();
+        }
+    }
+
+    // Parse stored image_spec JSON (set at Card 1 per R62 §2.3 7-field block).
+    // Falls back to null on malformed legacy rows -- the metadata JSON will
+    // carry image_spec=null rather than failing the whole mint.
+    let parsedImageSpec: Record<string, unknown> | null = null;
+    if (purchase.image.image_spec) {
+        try {
+            parsedImageSpec = JSON.parse(purchase.image.image_spec) as Record<string, unknown>;
+        } catch (e) {
+            console.warn('[run_image_ops] image_spec JSON parse failed for', purchase.image_id, (e as Error).message);
+        }
+    }
+    // Parse stored capture_setup JSON (set at Card 1; EXIF-derived camera /
+    // lens / exposure block). Falls back to null on malformed rows.
+    let parsedCaptureSetup: Record<string, unknown> | null = null;
+    if (purchase.image.capture_setup) {
+        try {
+            parsedCaptureSetup = JSON.parse(purchase.image.capture_setup) as Record<string, unknown>;
+        } catch (e) {
+            console.warn('[run_image_ops] capture_setup JSON parse failed for', purchase.image_id, (e as Error).message);
+        }
+    }
+
+    // Moment-of-sealing YouTube snapshots (creator_snapshot + video_snapshot).
+    // Fetched best-effort just before mint -- API failures yield null and the
+    // mint proceeds (the deed simply records `null` blocks). No backfill at
+    // MVP per product scope. Each fetcher applies its own ~10s timeout.
+    const creatorYoutubeChannelId = purchase.image.creator.user.youtube_channel_id;
+    const creatorOwnershipVerified = !!purchase.image.creator.user.youtube_verified_at;
+    const creator_snapshot = creatorYoutubeChannelId
+        ? await fetchCreatorSnapshot(creatorYoutubeChannelId, creatorOwnershipVerified)
+        : null;
+    const video_snapshot = purchase.image.video_url
+        ? await fetchVideoSnapshot(
+              purchase.image.video_url,
+              purchase.image.video_moment_seconds,
+          )
+        : null;
+
     const dispatchResult = await dispatch({
         image_id: purchase.image_id,
         buyer_wallet: buyerWallet,
         buyer_email: buyerEmail,
         title: purchase.image.title,
         description: purchase.image.description,
+        story: purchase.image.story ?? null,
         creator_display_name: purchase.image.creator.display_name,
         preview_url: buildListingPreviewUrl(purchase.image_id),
         arweave_uri: arweaveResult.result.arweave_uri,
         sha256: arweaveResult.result.sha256,
+        pixel_sha256: purchase.image.pixel_sha256,
         phash: arweaveResult.result.phash,
         enc_final,
         license_signing_event_id: purchase.signing_event_id_license ?? null,
         royalty_pct: 10,
         creator_wallet: null, // TODO: creator.user.wallet_address once wallets subsystem populates it
+        creator_isa_signing_event_id,
+        creator_isa_signed_at,
+        // COA-relevant creator-entered facts (R71 §3.6: 1 of 1 at MVP). Only
+        // edition-stable fields go on the shared Arweave JSON; the per-edition
+        // ordinal lives on the cNFT leaf, not here.
+        creation_date: purchase.image.creation_date?.toISOString() ?? null,
+        edition_total: 1,
+        image_spec: parsedImageSpec,
+        capture_setup: parsedCaptureSetup,
+        creator_snapshot: creator_snapshot as Record<string, unknown> | null,
+        video_snapshot: video_snapshot as Record<string, unknown> | null,
     });
 
     if (!dispatchResult.ok) {
@@ -201,6 +266,10 @@ export async function startBuild(input: StartBuildInput): Promise<StartBuildResu
         dispatchResult.asset_id,
         dispatchResult.crossmint_job_id,
         buyerWallet,
+        {
+            creator_snapshot: creator_snapshot as Record<string, unknown> | null,
+            video_snapshot: video_snapshot as Record<string, unknown> | null,
+        },
     );
 
     return {

@@ -27,8 +27,9 @@ export interface DeedOnChainRecordData {
     creator_wallet: string | null;
     arweave_uri: string | null;
     arweave_ready_at: string | null;     // ISO; null while archive is propagating
-    sha256: string | null;
-    phash: string | null;
+    sha256: string | null;               // sha256 of cleartext Master file (full bytes); UI label: "File fingerprint"
+    image_fingerprint: string | null;    // sha256 of JPEG with metadata segments stripped; UI label: "Image fingerprint"
+    content_fingerprint: string | null;  // perceptual hash (visual similarity); UI label: "Content fingerprint"
     minted_at: string | null;            // ISO; rendered as "Issuance date"
 }
 
@@ -119,14 +120,19 @@ export default function DeedOnChainRecord({
                 />
             </dd>
 
-            <dt className="text-base-content/60">Data fingerprint</dt>
+            <dt className="text-base-content/60">File fingerprint</dt>
             <dd className="font-mono">
                 {data.sha256 ? <HashCell value={data.sha256} /> : <Cell value={null} redaction={redaction} mono />}
             </dd>
 
+            <dt className="text-base-content/60">Image fingerprint</dt>
+            <dd className="font-mono">
+                {data.image_fingerprint ? <HashCell value={data.image_fingerprint} /> : <Cell value={null} redaction={redaction} mono />}
+            </dd>
+
             <dt className="text-base-content/60">Content fingerprint</dt>
             <dd className="font-mono">
-                {data.phash ? <HashCell value={data.phash} /> : <Cell value={null} redaction={redaction} mono />}
+                {data.content_fingerprint ? <HashCell value={data.content_fingerprint} /> : <Cell value={null} redaction={redaction} mono />}
             </dd>
 
             <dt className="text-base-content/60">Issuance date</dt>

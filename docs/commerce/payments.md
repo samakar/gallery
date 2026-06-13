@@ -1,6 +1,6 @@
 # Payments (Commerce)
 
-Stripe orchestration: checkout init, the four webhook handlers, 90 / 10 net split, refunds. Owns the entry and exit of the purchase pipeline (`purchases.status` lands at `started` from checkout init; lands at `paid` on success; lands at `failed` then `refunded` on payment failure or downstream terminal collapse). The middle of the pipeline (`paid → building → minting → confirmed`) is owned by runImageOps + Registry's crossmint_webhook. Per **ADR-0001**, runImageOps is triggered by a buyer-initiated `start-build` POST, not by this module's webhook handler.
+Stripe orchestration: checkout init, the four webhook handlers, 90 / 10 net split, refunds. Owns the entry and exit of the purchase pipeline (`purchases.status` lands at `started` from checkout init; lands at `paid` on success; lands at `failed` then `refunded` on payment failure or downstream terminal collapse). The middle of the pipeline (`paid → building → minting → confirmed`) is owned by runImageOps, which calls into the self-mint cnft_dispatch synchronously (no Crossmint webhook -- per ADR-0008, cNFT mints are self-issued via Bubblegum V2 inside runImageOps). Per **ADR-0001**, runImageOps is triggered by a buyer-initiated `start-build` POST, not by this module's webhook handler.
 
 ## 1. Interface
 
@@ -21,7 +21,7 @@ Stripe orchestration: checkout init, the four webhook handlers, 90 / 10 net spli
 #### refundPurchase
 | Field | Type | Notes |
 |---|---|---|
-| purchase_id | UUID | terminal-failure trigger from runImageOps or Registry's crossmint_webhook |
+| purchase_id | UUID | terminal-failure trigger from runImageOps (which owns mint outcome under self-mint per ADR-0008) |
 
 ### 1.2 Outputs
 
@@ -61,7 +61,7 @@ R71 §3.7 surfaces `STRIPE_PAYMENT_FAILED:<decline_code>` to the caller. `MJA_RE
 |---|---|
 | Pre (initCheckout) | `images.status='live'`; `owners` row exists; MJA + License Acceptance captured per INV-2 (caller responsibility -- esign) |
 | Pre (handleStripeWebhook) | raw body byte stream + `Stripe-Signature` header preserved (`express.raw`) |
-| Pre (refundPurchase) | `purchases.status` is `failed` OR upstream collapsed (`building` / `minting`) and the caller is runImageOps / crossmint_webhook |
+| Pre (refundPurchase) | `purchases.status` is `failed` OR upstream collapsed (`building` / `minting`) and the caller is runImageOps |
 | Post (initCheckout) | `purchases` row inserted with `status='started'`; Stripe Checkout Session created; client_secret returned |
 | Post (payment_intent.succeeded) | `purchases.status='paid'`; 90 / 10 net amounts persisted. **Does NOT spawn runImageOps** (ADR-0001) |
 | Post (payment_intent.payment_failed) | `purchases.status='failed'`; `failure_reason='STRIPE_PAYMENT_FAILED:<decline_code>'`; no refund (no charge ever captured) |
@@ -128,7 +128,7 @@ On `payment_intent.succeeded`, computed net of the Stripe processing fee:
 Both retained in Elanoid's Stripe balance at MVP. Stripe Connect Express transfers to creators activate at the immediate post-launch buildout per R71 §2.1 (4-week payout cadence from launch).
 
 ### 2.5 Refund (R71 §3.9 `runStripeRefund`)
-Triggered inline from runImageOps terminal failure or Registry's crossmint_webhook on `mint.failed`:
+Triggered inline from runImageOps terminal failure (mint synchronous under self-mint cnft_dispatch per ADR-0008; the failure path is a thrown exception within runImageOps, not an asynchronous webhook):
 
 | Step | Detail |
 |---|---|
@@ -158,7 +158,7 @@ Payments owns these transitions:
 Delegated transitions:
 - `paid → building` (buyer's `POST /v1/purchases/:id/start-build` per ADR-0001)
 - `building → minting` (runImageOps internal)
-- `minting → confirmed | failed` (Registry crossmint_webhook)
+- `minting → confirmed | failed` (Registry cnft_dispatch synchronous mint inside runImageOps)
 - `paid|building|minting → refunded` callback into `refundPurchase`
 
 ### 3.2 Webhook Body Stream Preservation
@@ -215,15 +215,15 @@ On `payment_intent.succeeded`, the webhook handler returns 200 to Stripe after a
 | **ADR-0001** | Buyer-triggered build / no monogram persistence -- the divergence shaping §2.3, §2.6 removal, and §3.4 |
 | esign | MJA + License Acceptance precede checkout (INV-2); R71 §3.7 row 16 `sign-license` endpoint |
 | image_gen | `monogram_text` flows from `purchases.monogram_text` (metadata-persisted per ADR-0002) via runImageOps to `generateShareCopy` |
-| runImageOps (TBD) | Triggered by buyer's `start-build` POST per ADR-0001; calls Registry's `arweave_master` + image_gen + Registry's `crossmint_dispatch`; calls back into `refundPurchase` on terminal failure |
+| runImageOps | Triggered by buyer's `start-build` POST per ADR-0001; calls Registry's `arweave_master` + image_gen + Registry's `cnft_dispatch` (self-mint, synchronous, per ADR-0008); calls back into `refundPurchase` on terminal failure |
 | renderer (TBD) | Not coupled to payments; serves the cached Share Copy via signed URL post-confirmation |
-| Registry crossmint_webhook (TBD) | Handles `minting → confirmed` / `minting → failed`; on failed, calls `refundPurchase` here |
+| Registry cnft_dispatch | Self-mint Bubblegum V2 entry point invoked synchronously by runImageOps (no webhook). Success returns `asset_id`; failure throws and runImageOps calls `refundPurchase` here |
 | R71 §2.4 steps 5-10 | Buyer purchase flow (this module diverges at step 7 spawn -- see ADR-0001) |
 | R71 §3.3 (Stripe) | Detailed vendor contract (events, body parsing, HMAC verification, idempotency) |
 | R71 §3.7 rows 15, 18, 21 | API endpoints owned by payments (row 17 monogram endpoint dropped per ADR-0001) |
-| R71 §3.8 (Purchase lifecycle) | State machine jointly owned by payments + runImageOps + crossmint_webhook |
+| R71 §3.8 (Purchase lifecycle) | State machine jointly owned by payments (entry/exit) + runImageOps (build → mint → confirmed) |
 | R71 §3.9 | runImageOps + runStripeRefund (trigger source diverges per ADR-0001) |
 | Constitution INV-02 | Platform MUST NOT hold buyer private keys (Stripe vaults PAN, not platform) |
 
 ---
-*Last Updated: 05/29/26 14:30*
+*Last Updated: 26/06/10 14:30*

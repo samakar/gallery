@@ -15,6 +15,7 @@
 
 import { createHash } from 'node:crypto';
 import bs58 from 'bs58';
+import { PublicKey as Web3JsPublicKey } from '@solana/web3.js';
 import { TurboFactory, ArweaveSigner } from '@ardrive/turbo-sdk';
 import Arweave from 'arweave';
 import { createUmi } from '@metaplex-foundation/umi-bundle-defaults';
@@ -46,6 +47,15 @@ const RPC_URL = process.env.SOLANA_RPC ?? 'https://api.devnet.solana.com';
 // host whose URL pattern could change. The route /i/<image_id>?variant=thumbnail
 // proxies/redirects to whatever CDN is current.
 const PLATFORM_BASE_URL = process.env.PLATFORM_BASE_URL ?? 'https://epimage.com';
+
+// Deed metadata JSON schema version. Source of truth for BOTH the body's
+// `schema` field AND the Arweave `Schema` tag -- they must always agree.
+// Pre-MVP launch resets to v1; future revisions bump from here.
+const DEED_METADATA_SCHEMA = 'epimage.deed.metadata/v1';
+// Arweave producer-code version (semver). Tracks the upload-handler
+// implementation, independent of the body schema. Pre-MVP-launch = 0.x;
+// bumps to 1.0 at first stable production release.
+const CNFT_DISPATCH_APP_VERSION = '0.1';
 
 function mustEnv(name: string): string {
     const v = process.env[name];
@@ -155,16 +165,49 @@ export interface DispatchInput {
     buyer_wallet: string | null;
     buyer_email: string; // unused at MVP -- cNFT mint requires a Solana wallet
     title: string;
-    description: string;
+    description: string;       // UI labels as "Caption"; Metaplex JSON convention requires field name `description`
+    story: string | null;      // UI labels as "Story"; optional long-form narrative
     creator_display_name: string;
     preview_url: string;
     arweave_uri: string | null;       // permanent Arweave URI of the encrypted Master (from arweave_master)
-    sha256: string | null;
+    sha256: string | null;            // full-file bytewise identity
+    pixel_sha256: string | null;      // pixel-content identity (metadata-stripped JPEG hash); null for non-JPEG
     phash: string | null;
     enc_final: string | null;
     license_signing_event_id: string | null;
     royalty_pct: number;
     creator_wallet: string | null;
+    // Creator's Image Signing Affirmation (ISA) -- the per-image authorship
+    // ESIGN click at Card 1. Threaded into the Arweave metadata JSON as the
+    // creator-side leg of the deed's COA. License signing (buyer-side, at
+    // Card 4) lives on license_signing_event_id above.
+    creator_isa_signing_event_id: string | null;
+    creator_isa_signed_at: string | null; // ISO UTC
+    // Creator-entered image facts mirrored into the Arweave metadata JSON so a
+    // trustless verifier with only the deed's `uri` can read every COA-relevant
+    // field without walking to Solana for the signed Memo props. The JSON is
+    // image-level + immutable, so only fields stable across all editions of
+    // the image belong here -- per-edition values (like this deed's edition
+    // ordinal) live on the cNFT's leaf / per-mint state, not here.
+    creation_date: string | null;        // ISO date the photo was taken (EXIF or manual)
+    edition_total: number;               // total editions of this image (1 at MVP per R71 §3.6)
+    image_spec: Record<string, unknown> | null;  // 7-field block per R62 §2.3:
+                                                  // { width_px, height_px, color_space,
+                                                  //   icc_profile, color_depth_bits,
+                                                  //   file_type, file_size_bytes }
+    // EXIF-derived camera/lens/exposure block read at Card 1 upload.
+    // Distinguishes professional capture (specific Make/Model + lens metadata
+    // + manual exposure + RAW format + camera-programmed Artist field) from
+    // phone/point-and-shoot defaults. Null when EXIF is unreadable.
+    // Embedded as-is into the Arweave metadata JSON.
+    capture_setup: Record<string, unknown> | null;
+    // Moment-of-sealing YouTube snapshots per /src/cert/youtube_snapshot.ts.
+    // Fetched best-effort by run_image_ops just before this dispatch; null on
+    // YouTube API failure or absent video association. Embedded as-is into the
+    // Arweave metadata JSON + mirrored to deeds.creator_snapshot /
+    // deeds.video_snapshot on the post_mint write.
+    creator_snapshot: Record<string, unknown> | null;
+    video_snapshot: Record<string, unknown> | null;
 }
 
 export type DispatchResult =
@@ -214,30 +257,72 @@ export async function dispatch(input: DispatchInput): Promise<DispatchResult> {
         // monogram stays in platform DB)
         const platformWallet = process.env.PLATFORM_WALLET_PUBKEY ?? umi.identity.publicKey.toString();
         const creators = buildCreatorsArray(input.creator_wallet, platformWallet);
+        // Pre-compute the deed's PDA address from (asset_id, DEED_PROGRAM_ID).
+        // Used by post-MVP resale architecture: the program writes rotating
+        // enc_final + monogram to this account. Reserved at MVP so every minted
+        // deed's Arweave JSON locks in the eventual side-car address, even
+        // though no program is deployed yet. Seed convention: [b"deed-data", asset_id].
+        // Null when DEED_PROGRAM_ID isn't configured (dev-test paths).
+        const deedPdaAddress = deriveDeedPdaAddress(predictedAssetId.toString());
         const metadataJson = buildDeedMetadataJson({
             input,
             assetId: predictedAssetId.toString(),
             collection: collectionPubkeyStr,
             creators,
+            deedPdaAddress,
         });
 
-        // Step 5: upload metadata JSON to Arweave
+        // Step 5: upload metadata JSON to Arweave with the 15-tag discovery
+        // index. Tags 8-15 may be null if the source data is unavailable
+        // (e.g. creator without YouTube, image without EXIF); we omit those
+        // rather than emit empty values so indexer filters behave cleanly.
+        // Arweave block.timestamp gives free upload-time search via GraphQL.
         let arweaveMetadataUri: string;
         try {
             const turbo = await getTurbo();
             const data = Buffer.from(JSON.stringify(metadataJson), 'utf-8');
+            const tags: Array<{ name: string; value: string }> = [
+                { name: 'Content-Type', value: 'application/json' },
+                { name: 'App-Name', value: 'Epimage' },
+                { name: 'App-Version', value: CNFT_DISPATCH_APP_VERSION },
+                { name: 'Schema', value: DEED_METADATA_SCHEMA },
+                { name: 'File-Name', value: `${input.image_id}.json` },
+                { name: 'Image-Id', value: input.image_id },
+                { name: 'Asset-Id', value: predictedAssetId.toString() },
+            ];
+            if (input.creator_wallet) {
+                tags.push({ name: 'Creator-Address', value: input.creator_wallet });
+            }
+            if (input.creator_display_name) {
+                tags.push({ name: 'Creator-Display-Name', value: input.creator_display_name });
+            }
+            const channelId = input.creator_snapshot?.channelId;
+            if (typeof channelId === 'string' && channelId.length > 0) {
+                tags.push({ name: 'YouTube-Channel-Id', value: channelId });
+            }
+            const channelHandle = input.creator_snapshot?.handle;
+            if (typeof channelHandle === 'string' && channelHandle.length > 0) {
+                tags.push({ name: 'YouTube-Channel-Handle', value: channelHandle });
+            }
+            const captureFormat = input.capture_setup?.capture_format;
+            if (typeof captureFormat === 'string' && captureFormat.length > 0 && captureFormat !== 'unknown') {
+                tags.push({ name: 'Capture-Format', value: captureFormat });
+            }
+            if (input.creation_date) {
+                const year = input.creation_date.slice(0, 4);
+                if (/^\d{4}$/.test(year)) {
+                    tags.push({ name: 'Capture-Year', value: year });
+                }
+            }
+            if (input.pixel_sha256) {
+                tags.push({ name: 'Image-Fingerprint', value: input.pixel_sha256 });
+            }
+            if (input.phash) {
+                tags.push({ name: 'Content-Fingerprint', value: input.phash });
+            }
             const upload = await turbo.upload({
                 data,
-                dataItemOpts: {
-                    tags: [
-                        { name: 'Content-Type', value: 'application/json' },
-                        { name: 'App-Name', value: 'Epimage' },
-                        { name: 'App-Version', value: '2-cnft-bubblegum-v2' },
-                        { name: 'Image-Id', value: input.image_id },
-                        { name: 'Asset-Id', value: predictedAssetId.toString() },
-                        { name: 'Schema', value: 'epimage.deed.metadata/v2' },
-                    ],
-                },
+                dataItemOpts: { tags },
             });
             arweaveMetadataUri = `https://arweave.net/${upload.id}`;
         } catch (e: any) {
@@ -368,19 +453,59 @@ interface BuildMetadataJsonArgs {
     assetId: string;
     collection: string;
     creators: BuildCreatorEntry[];
+    deedPdaAddress: string | null;
+}
+
+// Derive the future deed-data PDA address for a given asset_id. Pure
+// function -- no on-chain interaction. Anyone with the asset_id + the
+// DEED_PROGRAM_ID constant can recompute the same address. Returns null
+// when DEED_PROGRAM_ID isn't configured (CI / dev / fresh checkouts) so
+// the mint flow doesn't hard-fail on missing env -- the field just stays
+// absent from the JSON until DEED_PROGRAM_ID is set.
+function deriveDeedPdaAddress(assetId: string): string | null {
+    const programIdStr = process.env.DEED_PROGRAM_ID;
+    if (!programIdStr) return null;
+    try {
+        const programId = new Web3JsPublicKey(programIdStr);
+        const assetIdBytes = new Web3JsPublicKey(assetId).toBuffer();
+        const [pda] = Web3JsPublicKey.findProgramAddressSync(
+            [Buffer.from('deed-data'), assetIdBytes],
+            programId,
+        );
+        return pda.toBase58();
+    } catch (e) {
+        console.warn('[cnft_dispatch] deriveDeedPdaAddress failed:', (e as Error).message);
+        return null;
+    }
 }
 
 function buildDeedMetadataJson(args: BuildMetadataJsonArgs): Record<string, unknown> {
-    const { input, collection, creators } = args;
-    void args.assetId; // intentionally unused -- REQ-MINT-01 (asset_id binding
-                       // inside metadata) was retired; on-chain identity is
-                       // the canonical asset_id surface.
+    const { input, collection, creators, deedPdaAddress, assetId } = args;
     return {
-        schema: 'epimage.deed.metadata/v2-cnft-bubblegum-v2',
+        schema: DEED_METADATA_SCHEMA,
         // REQ-MINT-03 image-identity fields (monogram is NOT here)
         image_id: input.image_id,
+        // cNFT asset_id (Metaplex DAS standard). Matches the Arweave
+        // `Asset-Id` tag promoted to the upload's tag index. Lets a verifier
+        // reading only this JSON confirm "this metadata is for asset X"
+        // without consulting Solana.
+        asset_id: assetId,
         title: input.title || 'Untitled',
         creator_display_name: input.creator_display_name,
+        // COA-relevant creator-entered facts: every image-level field a buyer
+        // / auditor would want to verify, mirrored into the immutable mint-time
+        // JSON. Per-edition values (this deed's edition ordinal) are NOT here
+        // -- the JSON is shared across all editions of the image, so it can
+        // only carry edition-stable data. The per-edition ordinal is derivable
+        // from the cNFT's leaf_index on the tree.
+        creation_date: input.creation_date,
+        edition_total: input.edition_total,
+        image_spec: input.image_spec,
+        capture_setup: input.capture_setup,
+        // Moment-of-sealing YouTube snapshots. Captured by run_image_ops just
+        // before this dispatch and frozen here for permanence on Arweave.
+        creator_snapshot: input.creator_snapshot,
+        video_snapshot: input.video_snapshot,
         // Standard cNFT metadata fields some marketplaces expect
         name: nameForOnchain(input.image_id),
         symbol: 'epimage',
@@ -399,6 +524,11 @@ function buildDeedMetadataJson(args: BuildMetadataJsonArgs): Record<string, unkn
         // in or not (the page swaps to private-stub for non-owners post-sale).
         external_url: `${PLATFORM_BASE_URL}/${input.image_id}`,
         description: input.description || '',
+        // Optional photographer's narrative (UI label "Story"); emitted only
+        // when non-empty, keeping the JSON terse for deeds without one.
+        ...(input.story && input.story.trim().length > 0
+            ? { story: input.story }
+            : {}),
         seller_fee_basis_points: input.royalty_pct * 100,
         properties: {
             files: input.arweave_uri
@@ -414,10 +544,25 @@ function buildDeedMetadataJson(args: BuildMetadataJsonArgs): Record<string, unkn
         },
         // Cryptographic anchors per REQ-MINT-03
         arweave_master_uri: input.arweave_uri,
-        sha256: input.sha256,
-        phash: input.phash,
+        // Three fingerprint anchors. `sha256` keeps the industry-convention
+        // name (Arweave/crypto-standard); the other two use semantic names
+        // because no convention exists. UI display labels translate these to
+        // "File fingerprint" / "Image fingerprint" / "Content fingerprint".
+        sha256: input.sha256,                     // file hash (full bytes with metadata)
+        image_fingerprint: input.pixel_sha256,    // sha256 of JPEG with metadata segments stripped
+        content_fingerprint: input.phash,         // perceptual hash (similarity within threshold)
         enc_final: input.enc_final,
         license_signing_event_id: input.license_signing_event_id,
+        // Creator-side ESIGN -- the deed's COA leg. The buyer-side leg is
+        // license_signing_event_id above.
+        creator_isa_signing_event_id: input.creator_isa_signing_event_id,
+        creator_isa_signed_at: input.creator_isa_signed_at,
+        // Reserved post-MVP resale anchor. Derived from (asset_id, DEED_PROGRAM_ID)
+        // via the seed convention [b"deed-data", asset_id]. No on-chain account
+        // at this address yet -- the side-car program lands when resale ships.
+        // Anyone can re-derive this address; recording it makes the linkage
+        // explicit in the immutable mint-time JSON.
+        deed_pda_address: deedPdaAddress,
         // Embedded provenance manifest (post-MVP) goes here when wired:
         // tree_root_at_mint_time, mint_tx_signature, platform_signature
     };

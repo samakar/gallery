@@ -7,12 +7,10 @@ import { PrismaClient } from '@prisma/client';
 const prisma = new PrismaClient();
 
 async function main() {
-    // Allowlist
-    await prisma.creatorAllowlist.upsert({
-        where: { email: 'creator@example.com' },
-        create: { email: 'creator@example.com' },
-        update: {},
-    });
+    // Allowlist is now env-config (CREATOR_ALLOWLIST_ENABLED + CREATOR_ALLOWLIST_EMAILS)
+    // per identity.md §2.4 -- the creator_allowlist table was dropped in migration
+    // 20260610130000_drop_creator_allowlist. Add creator@example.com to
+    // CREATOR_ALLOWLIST_EMAILS in your .env if you want the gate active in dev.
 
     // Creator
     await prisma.user.upsert({
@@ -106,7 +104,8 @@ async function main() {
             asset_id: 'AssetIdK7P2M11111111111111111111111111111111',
             owner_wallet_address: 'BuyerWallet111111111111111111111111111111',
             owner_id: 'dev-buyer',
-            deed_state: 'sealed',
+            custody_state: 'sealed',
+            legal_state: 'legit',
             variant_hashes: JSON.stringify({}),
             minted_at: new Date('2026-04-18'),
         },

@@ -17,9 +17,9 @@ Per-creator workflow that gates a prospective creator from anonymous arrival thr
 | 2 | Session creation | `POST /v1/auth/session` (R71 §3.7 row 1) | identity.verifyDidToken | `users` row upserted by `magic_did`; `email`, `oauth_provider` populated; `wallet_address` NULL pending ESIGN | MAGIC_DID_INVALID |
 | 3 | Client requests YouTube OAuth URL | `GET /v1/creator/youtube/authorize-url` (R71 §3.7) | identity (URL builder; binds `state` to Magic session) | -- | -- |
 | 4 | Client redirects to Google OAuth (`youtube.readonly`); Google returns auth code | Google (external) | -- | -- | -- |
-| 5 | YouTube eligibility verify | `POST /v1/creator/youtube/verify` (R71 §3.7) | identity.verifyYoutubeEligibility(user_id, oauth_code) -- exchanges code, calls `channels.list?part=snippet,statistics&mine=true`, applies gates in order (presence -> hidden -> subscriber>=100_000); dormancy sub-gate skipped at MVP per identity.md §2.8.1 (feature-flagged off) | On pass: `creator_allowlist` upsert with `note='youtube_oauth'`; `users.youtube_channel_id`, `users.youtube_channel_handle`, `users.youtube_subscriber_count_at_onboarding`, `users.youtube_verified_at` persisted; access token discarded (no refresh) | YOUTUBE_OAUTH_FAILED / YOUTUBE_NO_CHANNEL / YOUTUBE_HIDDEN_SUBSCRIBERS / YOUTUBE_INSUFFICIENT_SUBSCRIBERS (identity.md §1.3) |
-| 6 | Profile capture + CMA sign | `POST /v1/creator/sign-cma` (R71 §3.7 row 4) | identity.assertCreatorAllowlisted(email) -> esign.captureSignature(CMA) | Single transaction: `signatures` row with `document_type='CMA'` + `creators` row created with `legal_name`, `legal_address`, `entity_type`, `display_name`, `creator_headshot`, `creator_bio` (identity.md §2.7); `creator_channel_url` derived at render time from `youtube_channel_handle` | CREATOR_NOT_ALLOWLISTED / ESIGN_DOCUMENT_REQUIRED |
-| 7 | Wallet provisioning (post-ESIGN) | Backend (inline at step 6 endpoint) | identity.provisionWalletIfMissing(user_id) -> Magic silent wallet provisioning (Registry-owned per INV-4) | `users.wallet_address` populated (Solana pubkey); idempotent on re-auth | -- |
+| 5 | YouTube eligibility verify | `POST /v1/creator/youtube/verify` (R71 §3.7) | identity.verifyYoutubeEligibility(user_id, oauth_code) -- exchanges code, calls `channels.list?part=snippet,statistics&mine=true`, applies gates in order (presence -> hidden -> subscriber>=100_000); dormancy sub-gate skipped at MVP per identity.md §2.8.1 (feature-flagged off) | On pass: `users.youtube_channel_id`, `users.youtube_channel_handle`, `users.youtube_subscriber_count_at_onboarding`, `users.youtube_verified_at` persisted; access token discarded (no refresh). **No DB allowlist write** -- allowlist is env-config per identity.md §2.4 (`CREATOR_ALLOWLIST_ENABLED` + `CREATOR_ALLOWLIST_EMAILS`). | YOUTUBE_OAUTH_FAILED / YOUTUBE_NO_CHANNEL / YOUTUBE_HIDDEN_SUBSCRIBERS / YOUTUBE_INSUFFICIENT_SUBSCRIBERS (identity.md §1.3) |
+| 6 | Wallet provisioning (pre-ESIGN per esign.md §2.8) | Backend (inline at step 5 endpoint success path, OR a dedicated trigger) | identity.provisionWalletIfMissing(user_id) -> Magic silent wallet provisioning (Registry-owned per INV-4) | `users.wallet_address` populated (Solana pubkey); idempotent on re-auth | WALLET_PROVISION_FAILED (retry on next authed call) |
+| 7 | Profile capture + CMA sign (Solana-tx ESIGN per esign.md §2.8 -- user's wallet co-signs the CMA Memo tx) | `POST /v1/creator/sign-cma` (R71 §3.7 row 4) | identity.assertNoOwnerRole(user_id) → identity.assertCreatorAllowlisted(email) (env-config read) → esign.captureSignature(CMA) | Single transaction: `signatures` row with `document_type='CMA'` + `creators` row with `legal_name`, `legal_address`, `entity_type`, `display_name`, `creator_headshot`, `creator_bio` (identity.md §2.7); `creator_channel_url` derived at render time from `youtube_channel_handle`. MVP single-role exclusivity: rejects `ROLE_CONFLICT_USER_IS_BUYER` if `owners` row exists for this user_id (identity.md §2.3). **Precondition**: `users.wallet_address NOT NULL` (set at step 6) -- without it the Solana-tx ESIGN cannot construct a Memo tx for the user's wallet to co-sign. | WALLET_REQUIRED / CREATOR_NOT_ALLOWLISTED / ROLE_CONFLICT_USER_IS_BUYER / ESIGN_DOCUMENT_REQUIRED |
 | 8 | Onboarding complete; creator dashboard renders | Web App | -- | Card 1 Certify entry point (file-select) unlocked | -- |
 
 ## 3. State Transitions
@@ -29,19 +29,27 @@ Per-creator workflow that gates a prospective creator from anonymous arrival thr
 | From | To | Trigger | Step |
 |---|---|---|---|
 | (none) | row exists; `wallet_address=NULL` | identity.verifyDidToken first-sight | 2 |
-| `wallet_address=NULL` | `wallet_address` populated | identity.provisionWalletIfMissing post-CMA | 7 |
+| `wallet_address=NULL` | `wallet_address` populated | identity.provisionWalletIfMissing post-YouTube-verify | 6 |
 
-`creator_allowlist`:
+Creator allowlist (no DB table -- env-config per identity.md §2.4):
 
-| From | To | Trigger | Step |
-|---|---|---|---|
-| (no row for email) | row inserted with `note='youtube_oauth'` | verifyYoutubeEligibility pass | 5 |
+| Mechanism | Notes |
+|---|---|
+| `CREATOR_ALLOWLIST_ENABLED=true` + email in `CREATOR_ALLOWLIST_EMAILS` | Gate is binary (off/on); read at sign-cma time. No DB writes during YouTube verify. |
 
 `creators` (role grant per identity.md §2.3):
 
 | From | To | Trigger | Step |
 |---|---|---|---|
-| (no row) | row inserted in same txn as CMA `signatures` row | sign-cma success | 6 |
+| (no row) | row inserted in same txn as CMA `signatures` row | sign-cma success | 7 |
+
+`AuthenticatedPrincipal.roles.is_creator` (derived per identity.ts `verifyDidToken`):
+
+| From | To | Trigger | Step |
+|---|---|---|---|
+| `false` | `true` | After both `users.wallet_address` populated (step 6) AND `creators` row inserted (step 7); first read on the next `verifyDidToken` call after sign-cma returns | observable at 8 |
+
+Derivation: `is_creator = (creators row exists for user_id) AND (users.wallet_address NOT NULL)`. Wallet provisioning at step 6 satisfies the wallet condition first; CMA capture at step 7 satisfies the creators-row condition. The flag flips on the next authed request the client makes after step 7 commits (typically the dashboard load at step 8). Until step 7 succeeds, the user has a wallet but `is_creator` stays `false` -- a wallet alone doesn't grant creator role.
 
 ## 4. Failure Modes
 
@@ -52,20 +60,22 @@ Per-creator workflow that gates a prospective creator from anonymous arrival thr
 | 5 (YOUTUBE_NO_CHANNEL) | Same; remediation message: connect a Google account that owns a YouTube channel |
 | 5 (YOUTUBE_HIDDEN_SUBSCRIBERS) | Same; remediation: unhide subscriber count on YouTube and retry |
 | 5 (YOUTUBE_INSUFFICIENT_SUBSCRIBERS) | Same; hard block -- creator cannot proceed to sign-cma |
-| 5 (YOUTUBE_CHANNEL_ALREADY_CLAIMED) | All gates passed but the channel_id is already bound to another `users` row. No allowlist insert; remediation: creator must use the Magic email they used at first verify. Manual founder override path: allowlist insert with `note='manual:channel_transfer'` after off-band verification (identity.md §2.8.4b) |
+| 5 (YOUTUBE_CHANNEL_ALREADY_CLAIMED) | All gates passed but the channel_id is already bound to another `users` row. No fields persisted; remediation: creator must use the Magic email they used at first verify. Manual founder override path: add the creator's email to `CREATOR_ALLOWLIST_EMAILS` after off-band verification (identity.md §2.8.4b) |
 | 5 (ALREADY_VERIFIED) | This `users` row has already passed YouTube verification; the endpoint short-circuits before token exchange. No-op |
-| 6 (CREATOR_NOT_ALLOWLISTED) | Should not occur after step 5 pass; indicates allowlist row absent (race / DB error); retry or escalate |
-| 6 (ESIGN failure) | Prisma transaction rolled back; no `creators` row; no `signatures` row; creator retries sign-cma |
-| 7 (wallet provisioning failure) | `creators` row + CMA already committed; identity.provisionWalletIfMissing re-runs on next authed call (idempotent on `users.wallet_address`) |
+| 6 (WALLET_PROVISION_FAILED) | `users.wallet_address` stays NULL; client retries on next authed request (`provisionWalletIfMissing` is idempotent per identity.md §2.6). Without wallet, sign-cma rejects with WALLET_REQUIRED, so the user is stuck pre-CMA until provisioning succeeds. |
+| 7 (WALLET_REQUIRED) | sign-cma precondition fail -- step 6 wallet provisioning never succeeded. Client surfaces a retry CTA; backend re-attempts provisioning on the next authed request. No `creators` row, no `signatures` row. |
+| 7 (CREATOR_NOT_ALLOWLISTED) | Wallet provisioned but email not in `CREATOR_ALLOWLIST_EMAILS` (or `CREATOR_ALLOWLIST_ENABLED=false`). Remediation: founder adds email to env-config and the creator retries sign-cma. Wallet remains; no harm. |
+| 7 (ROLE_CONFLICT_USER_IS_BUYER) | The user_id already has an `owners` row (signed an MJA on a previous purchase). MVP single-role exclusivity per identity.md §2.3 -- buyer must use a different account to become a creator. Wallet remains; no harm. Post-MVP feature: dual-role per identity.md OI-04b. |
+| 7 (ESIGN failure) | Prisma transaction rolled back; no `creators` row; no CMA `signatures` row. Wallet remains. Creator retries sign-cma. |
 
 ## 5. Subsystems Invoked
 
 | Subsystem | Step |
 |---|---|
-| identity | 2 (verifyDidToken), 5 (verifyYoutubeEligibility), 6 (assertCreatorAllowlisted), 7 (provisionWalletIfMissing) |
-| esign | 6 (CMA capture) |
-| storage (TBD) | 6 (`creator_headshot` upload per identity.md §2.7) |
-| Registry: wallets | 7 (Magic Solana wallet provisioning per INV-4) |
+| identity | 2 (verifyDidToken), 5 (verifyYoutubeEligibility), 6 (provisionWalletIfMissing), 7 (assertNoOwnerRole + assertCreatorAllowlisted) |
+| Registry: wallets | 6 (Magic Solana wallet provisioning per INV-4) |
+| esign | 7 (CMA capture; Solana-tx Memo co-signed by the user's wallet per esign.md §2.8) |
+| storage (TBD) | 7 (`creator_headshot` upload per identity.md §2.7) |
 
 ## 6. Open Issues
 
@@ -74,7 +84,7 @@ Per-creator workflow that gates a prospective creator from anonymous arrival thr
 | OI-01 | Multi-channel Google accounts: step 5 takes `items[0]`; channel-picker UI deferred (identity.md OI-09) |
 | OI-02 | Post-onboarding subscriber drift: no re-check; frozen snapshot per identity.md §2.8.1 + OI-07 |
 | OI-03 | Dormancy gate activation timing: MVP-off per identity.md §2.8.1; production cutover is a flag flip in the go-live checklist §4.5, not a code change |
-| OI-04 | Step 6 / step 7 atomicity: wallet provisioning failure leaves `creators` row without `wallet_address`; recovery is the idempotent re-call on next authed route -- acceptable but not transactional |
+| OI-04 | Step 6 / step 7 ordering: wallet provisioning runs **before** CMA capture because Solana-tx ESIGN (esign.md §2.8) requires the wallet to co-sign the CMA Memo tx. If step 6 fails or the user aborts between step 6 and step 7, the `users` row has a wallet but no `creators` row; `is_creator` stays `false` per the derivation. Recovery: the next authed request retries provisioning (idempotent) AND surfaces the sign-cma CTA. The wallet is harmless to leave around (orphan wallets are a no-op until a CMA or MJA event consumes them). |
 
 ## 7. Cross-References
 
@@ -96,4 +106,4 @@ Per-creator workflow that gates a prospective creator from anonymous arrival thr
 | certify_wsd.md | downstream workflow -- consumes the post-onboarding `creators` row + wallet as preconditions |
 
 ---
-*Last Updated: 26/06/04 13:00*
+*Last Updated: 26/06/10 19:00*

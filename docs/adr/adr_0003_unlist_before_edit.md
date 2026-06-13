@@ -53,14 +53,14 @@ There is no "live + mutating" state at any point. The DB only ever sees `'live'`
 | `src/app/api/server.ts` | New `POST /v1/images/:imageId/unlist` route |
 | `src/ui/Image.tsx` | New `owner-listed` render state + `OwnerListedView` component; `deriveState` routes `is_creator && status='live'` → owner-listed |
 | `docs/commerce/metadata.md` | Add `unlistListing` to interface; update visibility state machine to include `live → draft` transition |
-| `docs/commerce/list_wsd.md` | Add unlist sub-workflow; update state transitions table |
+| `docs/workflows/list_wsd.md` | Add unlist sub-workflow; update state transitions table |
 
 ## Cross-references
 
 | Doc | Purpose |
 |---|---|
 | [commerce/metadata.md](../commerce/metadata.md) | Owns the new `unlistListing` surface |
-| [commerce/list_wsd.md](../commerce/list_wsd.md) | Card 3 List workflow + unlist sub-flow |
+| [workflows/list_wsd.md](../workflows/list_wsd.md) | Card 3 List workflow + unlist sub-flow |
 | R71 §3.4 row 6 OI | The deferred edit-post-publish open issue this resolves for pre-sale |
 | R71 §3.8 | Image lifecycle (now includes `live → draft` per this ADR) |
 

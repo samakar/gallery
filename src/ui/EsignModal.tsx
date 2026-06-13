@@ -43,7 +43,7 @@ export function EsignModal({
         let cancelled = false;
         Promise.all([
             needsMja ? api<LegalDoc>('/v1/legal/MJA') : Promise.resolve(null),
-            api<LegalDoc>('/v1/legal/LICENSE_ACCEPTANCE'),
+            api<LegalDoc>('/v1/legal/SAL'),
         ])
             .then(([m, l]) => {
                 if (cancelled) return;
@@ -69,7 +69,7 @@ export function EsignModal({
             }
             const licenseRes = await api<{ signature_id: string }>('/v1/signatures', {
                 method: 'POST',
-                body: JSON.stringify({ document_type: 'LICENSE_ACCEPTANCE', image_id: imageId }),
+                body: JSON.stringify({ document_type: 'SAL', image_id: imageId }),
             });
             onConfirm({ mja_signature_id: mjaSigId, license_signature_id: licenseRes.signature_id });
         } catch (e: any) {

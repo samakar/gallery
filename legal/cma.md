@@ -24,6 +24,12 @@ This Creator Master Agreement ("Agreement") is entered into between Epimage, Inc
   (a) the Platform's continuing right to maintain on-chain records of past transactions involving the Works;
   (b) the Platform's right to continue serving Works whose ownership has been transferred to third-party Buyers via Deeds.
 
+2.4. **Master preservation.** The original file you upload for each Work (the "Master") is preserved byte-for-byte by the Platform. The Platform does not strip, alter, or rewrite any portion of the Master, including but not limited to embedded EXIF metadata, IPTC fields, XMP records, ICC color profiles, GPS coordinates, the photographer-programmed `Artist` and `Copyright` fields, camera and lens serial numbers, and any other embedded data the camera or your editing tools wrote into the file. The cryptographic anchors recorded on-chain — `sha256` over the Master bytes and `phash` over the perceptual pixel content — bind to the file exactly as you uploaded it.
+
+2.5. **Operational variants are not modifications to the Master.** Listing Copies, Share Copies, Thumbnails, and any other derived images the Platform generates under Section 2.2 are produced from the cleartext Master in memory at upload time. They are stored as separate assets, never overwriting the Master. The Master itself, once encrypted and persisted by the Platform, is never decrypted, re-encoded, or modified by any Platform process other than (a) lifting it to permanent Arweave storage as-is and (b) decrypting it on a Buyer's authenticated download request.
+
+2.6. **Implications of byte-exact preservation you should understand.** Because the Master is preserved exactly, any embedded location data (GPS coordinates), personal identifiers (camera body or lens serial numbers, Artist field), or other sensitive metadata your file contains will travel with the Master to every Buyer who downloads it. If you wish to omit such fields, you are responsible for stripping them from your file before uploading. The Platform records only a boolean indicator (`gps_record`) on the public deed metadata to disclose the presence of GPS data without revealing the coordinates themselves, but the coordinates remain in the Master file that the Buyer receives.
+
 ## 3. Listings and edition format
 
 3.1. Each Work you list constitutes a unique edition (1 of 1). Multi-edition listings are not supported.

@@ -22,7 +22,7 @@ interface DeedData {
     asset_id: string;               // Firm -- cNFT asset_id; shown to buyer as "Deed number"
     arweave_uri: string;            // Firm (canonical permanent URL)
     arweave_ready_at: string | null; // null until arweave_ready_sweeper confirms the gateway can serve the bytes
-    sha256: string;                 // Firm (hex) -- "data fingerprint"
+    sha256: string;                 // Firm (hex sha256 of the cleartext Master file; UI label: "File fingerprint")
     minted_at: string;              // ISO -- Firm (rendered as "Issued")
     custody_state: 'sealed' | 'unsealed' | 'burned';
     legal_state: 'legit' | 'disputed' | 'void';
@@ -118,7 +118,8 @@ function FirmSection({ data }: { data: DeedData }) {
                     arweave_uri: data.arweave_uri || null,
                     arweave_ready_at: data.arweave_ready_at,
                     sha256: data.sha256 || null,
-                    phash: null,
+                    image_fingerprint: null,
+                    content_fingerprint: null,
                     minted_at: data.minted_at,
                 }}
             />

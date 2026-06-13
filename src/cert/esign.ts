@@ -13,10 +13,11 @@ import { createHash } from 'node:crypto';
 import { prisma } from '../db';
 
 export type DocumentType =
-    | "CMA"
-    | "MJA"
-    | "IMAGE_SIGNING_AFFIRMATION"
-    | "LICENSE_ACCEPTANCE";
+    | "CMA"   // Creator Master Agreement -- creator-platform, signed at sign-cma
+    | "MJA"   // Master Joint Agreement -- buyer-platform, signed at first purchase
+    | "COA"   // Certificate of Authenticity -- per-image creator attestation (was IMAGE_SIGNING_AFFIRMATION pre-MVP)
+    | "SAL"   // Sales Agreement -- per-image bilateral sale + use license (was LICENSE_ACCEPTANCE pre-MVP)
+    | "DLN";  // Master Download Notice -- buyer's pre-download consent, gates sealed -> unsealed
 
 export type EsignErrorCode =
     | "ESIGN_DOCUMENT_REQUIRED"
@@ -33,7 +34,7 @@ export interface SignatureInput {
     document_type: DocumentType;
     document_text: string;            // fully rendered; sha256 -> document_version_hash
     document_version_label: string;   // e.g., "CMA-v1.0"
-    image_id: string | null;          // required for ISA + LICENSE_ACCEPTANCE
+    image_id: string | null;          // required for COA + SAL + DLN (per-image documents)
     click: ClickEvent;
 }
 
